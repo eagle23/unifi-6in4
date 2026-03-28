@@ -12,12 +12,11 @@ log_message() {
 
 log_message "installing ipv6-tunnel to ${INSTALL_DIR}"
 
-mkdir -p "${INSTALL_DIR}/web"
+mkdir -p "${INSTALL_DIR}"
 
 cp /tmp/ipv6-tunnel-server "${INSTALL_DIR}/"
 cp /tmp/tunnel.sh "${INSTALL_DIR}/"
 cp /tmp/rc-local-fragment.sh "${INSTALL_DIR}/"
-cp /tmp/index.html "${INSTALL_DIR}/web/"
 
 chmod +x "${INSTALL_DIR}/ipv6-tunnel-server"
 chmod +x "${INSTALL_DIR}/tunnel.sh"
@@ -84,4 +83,4 @@ log_message "starting server"
 log_message "installation complete"
 log_message "access UI at http://$(hostname -I | awk '{print $1}'):8686/"
 
-rm -f /tmp/ipv6-tunnel-server /tmp/tunnel.sh /tmp/rc-local-fragment.sh /tmp/index.html
+rm -f /tmp/ipv6-tunnel-server /tmp/tunnel.sh /tmp/rc-local-fragment.sh

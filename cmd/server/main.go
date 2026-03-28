@@ -14,6 +14,7 @@ import (
 	"github.com/eagle23/unifi-tunnel-4to6/internal/api"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/control"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/tunnel"
+	webui "github.com/eagle23/unifi-tunnel-4to6/web"
 )
 
 func main() {
@@ -49,14 +50,7 @@ func runServe(args []string) {
 	}
 	defer service.Stop()
 	handler := api.NewHandler(service)
-	webDir := filepath.Join(baseDir, "web")
-	var webFS http.FileSystem
-	if info, err := os.Stat(webDir); err == nil && info.IsDir() {
-		webFS = http.Dir(webDir)
-	} else {
-		log.Printf("web directory not found at %s, UI will not be served", webDir)
-	}
-	server := api.NewServer(handler, service.CurrentToken, webFS)
+	server := api.NewServer(handler, service.CurrentToken, webui.FileSystem())
 	controlSocketPath := filepath.Join(filepath.Dir(*configPath), "daemon.sock")
 	controlHandler := api.NewControlServer(handler)
 	controlListener, err := listenUnixSocket(controlSocketPath)

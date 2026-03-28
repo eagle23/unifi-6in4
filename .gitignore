@@ -2,4 +2,4 @@ bin/
 *.exe
 .DS_Store
 .serena/
-server
+/server

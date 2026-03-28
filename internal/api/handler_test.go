@@ -10,6 +10,7 @@ import (
 	"github.com/eagle23/unifi-tunnel-4to6/internal/api"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/config"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/tunnel"
+	webui "github.com/eagle23/unifi-tunnel-4to6/web"
 )
 
 type mockController struct {
@@ -244,5 +245,22 @@ func TestControlServerSkipsExternalAuth(t *testing.T) {
 	server.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+func TestServerServesEmbeddedUI(t *testing.T) {
+	controller := &mockController{
+		config: config.Defaults(),
+		status: &tunnel.Status{},
+	}
+	server := api.NewServer(api.NewHandler(controller), func() string { return "" }, webui.FileSystem())
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("IPv6 Tunnel Manager")) {
+		t.Fatalf("body does not contain embedded UI marker")
 	}
 }

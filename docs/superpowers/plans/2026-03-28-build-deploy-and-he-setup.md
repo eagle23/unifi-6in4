@@ -8,6 +8,7 @@
 - локальные управляющие команды идут через `/data/ipv6-tunnel/daemon.sock`;
 - desired state хранится в `/data/ipv6-tunnel/config.json`;
 - observed state хранится в `/data/ipv6-tunnel/state.json`;
+- web UI встроен прямо в бинарь;
 - `scripts/tunnel.sh` теперь только compatibility wrapper над `ipv6-tunnel-server ctl ...`.
 
 ## Пути и интерфейсы
@@ -107,9 +108,9 @@ make install ROUTER_HOST=192.168.1.1 ROUTER_USER=root
 Что делает `make install`:
 
 - собирает бинарь;
-- загружает `install.sh`, `ipv6-tunnel-server`, `tunnel.sh`, `rc-local-fragment.sh` и `index.html` в `/tmp` на роутере;
+- загружает `install.sh`, `ipv6-tunnel-server`, `tunnel.sh` и `rc-local-fragment.sh` в `/tmp` на роутере;
 - запускает `/tmp/install.sh`;
-- создаёт `/data/ipv6-tunnel` и `/data/ipv6-tunnel/web`;
+- создаёт `/data/ipv6-tunnel`;
 - устанавливает бинарь и shell wrapper;
 - создаёт дефолтный `config.json` с `tunnel.enabled=false`, если файла ещё нет;
 - добавляет boot entry в `/etc/rc.local`, который вызывает `/data/ipv6-tunnel/tunnel.sh boot`;
@@ -132,11 +133,9 @@ make deploy ROUTER_HOST=192.168.1.1 ROUTER_USER=root
 Что делает `make deploy`:
 
 - собирает бинарь;
-- убеждается, что `/data/ipv6-tunnel/web` существует;
 - загружает:
   - `bin/ipv6-tunnel-server`
   - `scripts/tunnel.sh`
-  - `web/index.html`
 - напрямую перезапускает daemon через `/data/ipv6-tunnel/ipv6-tunnel-server`
 
 Важно:
