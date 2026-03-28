@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	nftChainInput   = "ipv6tunnel-input"
-	nftChainForward = "ipv6tunnel-forward"
+	iptablesChainInput   = "IPV6TUNNEL_INPUT"
+	iptablesChainForward = "IPV6TUNNEL_FORWARD"
 )
 
 var (
@@ -129,14 +129,18 @@ func (b *SystemBackend) Reconcile(input ReconcileInput) error {
 			}
 		}
 	}
-	b.runBestEffort("nft", "add", "table", "ip", "filter")
-	b.runBestEffort("nft", "add", "chain", "ip", "filter", nftChainInput, "{ type filter hook input priority 0; }")
-	b.runBestEffort("nft", "add", "rule", "ip", "filter", nftChainInput, "iifname", input.Config.Server.WANInterface, "ip", "protocol", "41", "accept")
-	b.runBestEffort("nft", "add", "table", "ip6", "filter")
-	b.runBestEffort("nft", "add", "chain", "ip6", "filter", nftChainForward, "{ type filter hook forward priority 0; }")
-	b.runBestEffort("nft", "add", "rule", "ip6", "filter", nftChainForward, "iifname", tunnel.InterfaceName, "ct", "state", "established,related", "accept")
-	b.runBestEffort("nft", "add", "rule", "ip6", "filter", nftChainForward, "oifname", tunnel.InterfaceName, "accept")
-	b.runBestEffort("nft", "add", "rule", "ip6", "filter", nftChainForward, "iifname", tunnel.InterfaceName, "ct", "state", "new", "drop")
+	// IPv4: allow protocol 41 (6in4) on WAN
+	b.runBestEffort("iptables", "-N", iptablesChainInput)
+	b.runBestEffort("iptables", "-F", iptablesChainInput)
+	b.runBestEffort("iptables", "-A", iptablesChainInput, "-i", input.Config.Server.WANInterface, "-p", "41", "-j", "ACCEPT")
+	b.ensureJump("iptables", "INPUT", iptablesChainInput)
+	// IPv6: stateful forwarding through tunnel
+	b.runBestEffort("ip6tables", "-N", iptablesChainForward)
+	b.runBestEffort("ip6tables", "-F", iptablesChainForward)
+	b.runBestEffort("ip6tables", "-A", iptablesChainForward, "-i", tunnel.InterfaceName, "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT")
+	b.runBestEffort("ip6tables", "-A", iptablesChainForward, "-o", tunnel.InterfaceName, "-j", "ACCEPT")
+	b.runBestEffort("ip6tables", "-A", iptablesChainForward, "-i", tunnel.InterfaceName, "-m", "state", "--state", "NEW", "-j", "DROP")
+	b.ensureJump("ip6tables", "FORWARD", iptablesChainForward)
 	return nil
 }
 
@@ -174,8 +178,12 @@ func (b *SystemBackend) Probe(target string) (ProbeResult, error) {
 }
 
 func (b *SystemBackend) teardown(applied AppliedState) {
-	b.runBestEffort("nft", "delete", "chain", "ip", "filter", nftChainInput)
-	b.runBestEffort("nft", "delete", "chain", "ip6", "filter", nftChainForward)
+	b.removeJump("iptables", "INPUT", iptablesChainInput)
+	b.runBestEffort("iptables", "-F", iptablesChainInput)
+	b.runBestEffort("iptables", "-X", iptablesChainInput)
+	b.removeJump("ip6tables", "FORWARD", iptablesChainForward)
+	b.runBestEffort("ip6tables", "-F", iptablesChainForward)
+	b.runBestEffort("ip6tables", "-X", iptablesChainForward)
 	for _, network := range applied.Networks {
 		gatewayAddress, err := gatewayForPrefix(network.Prefix)
 		if err != nil {
@@ -212,6 +220,18 @@ func (b *SystemBackend) run(name string, args ...string) error {
 
 func (b *SystemBackend) runBestEffort(name string, args ...string) {
 	_, _ = b.runner.CombinedOutput(name, args...)
+}
+
+// ensureJump adds a -j jump rule to parentChain if not already present.
+func (b *SystemBackend) ensureJump(binary string, parentChain string, targetChain string) {
+	if _, err := b.runner.CombinedOutput(binary, "-C", parentChain, "-j", targetChain); err != nil {
+		b.runBestEffort(binary, "-I", parentChain, "-j", targetChain)
+	}
+}
+
+// removeJump removes a -j jump rule from parentChain.
+func (b *SystemBackend) removeJump(binary string, parentChain string, targetChain string) {
+	b.runBestEffort(binary, "-D", parentChain, "-j", targetChain)
 }
 
 func gatewayForPrefix(prefixValue string) (string, error) {
