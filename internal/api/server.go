@@ -26,19 +26,28 @@ func authMiddleware(getToken TokenFunc, next http.Handler) http.Handler {
 
 func NewServer(h *Handler, getToken TokenFunc, webFS http.FileSystem) http.Handler {
 	mux := http.NewServeMux()
-	apiMux := http.NewServeMux()
-	apiMux.HandleFunc("GET /api/status", h.HandleGetStatus)
-	apiMux.HandleFunc("GET /api/config", h.HandleGetConfig)
-	apiMux.HandleFunc("PUT /api/config", h.HandleUpdateConfig)
-	apiMux.HandleFunc("GET /api/health", h.HandleGetStatus)
-	apiMux.HandleFunc("POST /api/tunnel/up", h.HandleTunnelUp)
-	apiMux.HandleFunc("POST /api/tunnel/down", h.HandleTunnelDown)
-	apiMux.HandleFunc("POST /api/tunnel/restart", h.HandleTunnelRestart)
-	mux.Handle("/api/", authMiddleware(getToken, apiMux))
+	mux.Handle("/api/", authMiddleware(getToken, newAPIMux(h)))
 	if webFS != nil {
 		mux.Handle("/", http.FileServer(webFS))
 	}
 	return corsMiddleware(mux)
+}
+
+// NewControlServer builds the local control transport handler without external auth or static files.
+func NewControlServer(h *Handler) http.Handler {
+	return newAPIMux(h)
+}
+
+func newAPIMux(h *Handler) *http.ServeMux {
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("GET /api/status", h.HandleGetStatus)
+	apiMux.HandleFunc("GET /api/config", h.HandleGetConfig)
+	apiMux.HandleFunc("PUT /api/config", h.HandleUpdateConfig)
+	apiMux.HandleFunc("GET /api/health", h.HandleGetHealth)
+	apiMux.HandleFunc("POST /api/tunnel/up", h.HandleTunnelUp)
+	apiMux.HandleFunc("POST /api/tunnel/down", h.HandleTunnelDown)
+	apiMux.HandleFunc("POST /api/tunnel/restart", h.HandleTunnelRestart)
+	return apiMux
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

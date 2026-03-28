@@ -1,75 +1,54 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"path/filepath"
-	"sync"
-	"time"
 
 	"github.com/eagle23/unifi-tunnel-4to6/internal/api"
-	"github.com/eagle23/unifi-tunnel-4to6/internal/config"
-	"github.com/eagle23/unifi-tunnel-4to6/internal/ra"
+	"github.com/eagle23/unifi-tunnel-4to6/internal/control"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/tunnel"
 )
 
-type configStore struct {
-	mu   sync.RWMutex
-	cfg  *config.Config
-	path string
-}
-
-func (s *configStore) Get() *config.Config {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.cfg
-}
-
-func (s *configStore) Update(cfg *config.Config) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := config.Save(s.path, cfg); err != nil {
-		return err
-	}
-	s.cfg = cfg
-	return nil
-}
-
 func main() {
-	configPath := flag.String("config", "", "path to config.json")
-	scriptPath := flag.String("script", "", "path to tunnel.sh")
-	flag.Parse()
+	switch command := firstArgument(); command {
+	case "ctl":
+		runCtl(os.Args[2:])
+	case "serve":
+		runServe(os.Args[2:])
+	default:
+		runServe(os.Args[1:])
+	}
+}
 
-	baseDir := filepath.Dir(os.Args[0])
+func runServe(args []string) {
+	flagSet := flag.NewFlagSet("serve", flag.ExitOnError)
+	configPath := flagSet.String("config", "", "path to config.json")
+	flagSet.Parse(args)
+	baseDir := executableDir()
 	if *configPath == "" {
 		*configPath = filepath.Join(baseDir, "config.json")
 	}
-	if *scriptPath == "" {
-		*scriptPath = filepath.Join(baseDir, "tunnel.sh")
-	}
-
-	cfg, err := config.Load(*configPath)
+	statePath := filepath.Join(baseDir, "state.json")
+	service, err := control.NewService(control.ServiceParams{
+		ConfigPath: *configPath,
+		StatePath:  statePath,
+		Backend:    control.NewSystemBackend(),
+	})
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			cfg = config.Defaults()
-			if err := config.Save(*configPath, cfg); err != nil {
-				log.Fatalf("create default config: %v", err)
-			}
-			log.Printf("created default config at %s", *configPath)
-		} else {
-			log.Fatalf("load config: %v", err)
-		}
+		log.Fatalf("create control service: %v", err)
 	}
-
-	store := &configStore{cfg: cfg, path: *configPath}
-	mgr := tunnel.NewManager(*scriptPath)
-	handler := api.NewHandler(mgr, store)
-
+	if err := service.Start(); err != nil {
+		log.Printf("initial reconcile failed: %v", err)
+	}
+	defer service.Stop()
+	handler := api.NewHandler(service)
 	webDir := filepath.Join(baseDir, "web")
 	var webFS http.FileSystem
 	if info, err := os.Stat(webDir); err == nil && info.IsDir() {
@@ -77,79 +56,107 @@ func main() {
 	} else {
 		log.Printf("web directory not found at %s, UI will not be served", webDir)
 	}
-	getToken := func() string { return store.Get().Server.AuthToken }
-	srv := api.NewServer(handler, getToken, webFS)
-
-	if cfg.LAN.Enabled && len(cfg.LAN.Networks) > 0 {
-		startRA(cfg)
+	server := api.NewServer(handler, service.CurrentToken, webFS)
+	controlSocketPath := filepath.Join(filepath.Dir(*configPath), "daemon.sock")
+	controlHandler := api.NewControlServer(handler)
+	controlListener, err := listenUnixSocket(controlSocketPath)
+	if err != nil {
+		log.Fatalf("listen control socket: %v", err)
 	}
-
-	// Always start healthLoop — it checks Health.Enabled each iteration
-	go healthLoop(mgr, store)
-
-	addr := fmt.Sprintf("0.0.0.0:%d", cfg.Server.Port)
+	defer func() {
+		_ = controlListener.Close()
+		_ = os.Remove(controlSocketPath)
+	}()
+	go func() {
+		if serveErr := http.Serve(controlListener, controlHandler); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			log.Printf("control socket server failed: %v", serveErr)
+		}
+	}()
+	addr := fmt.Sprintf("0.0.0.0:%d", service.GetConfig().Server.Port)
 	log.Printf("listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, srv))
+	log.Printf("control socket listening on %s", controlSocketPath)
+	log.Fatal(http.ListenAndServe(addr, server))
 }
 
-func startRA(cfg *config.Config) {
-	var networks []ra.NetworkEntry
-	for _, nw := range cfg.LAN.Networks {
-		prefix, err := netip.ParsePrefix(nw.Prefix)
-		if err != nil {
-			log.Printf("ra: invalid prefix %q: %v", nw.Prefix, err)
-			continue
-		}
-		networks = append(networks, ra.NetworkEntry{
-			Interface: nw.Interface,
-			Prefix:    prefix,
-		})
+func runCtl(args []string) {
+	flagSet := flag.NewFlagSet("ctl", flag.ExitOnError)
+	configPath := flagSet.String("config", "", "path to config.json")
+	flagSet.Parse(args)
+	if flagSet.NArg() == 0 {
+		log.Fatalf("usage: %s ctl {status|up|down|restart|health}", filepath.Base(os.Args[0]))
 	}
-	var dns []netip.Addr
-	for _, d := range cfg.LAN.DNS {
-		addr, err := netip.ParseAddr(d)
-		if err != nil {
-			log.Printf("ra: invalid dns %q: %v", d, err)
-			continue
-		}
-		dns = append(dns, addr)
+	baseDir := executableDir()
+	if *configPath == "" {
+		*configPath = filepath.Join(baseDir, "config.json")
 	}
-	if len(networks) > 0 {
-		_, err := ra.NewAdvertiser(ra.AdvertiserConfig{
-			Networks: networks,
-			DNS:      dns,
-			Interval: 10 * time.Second,
-		})
+	socketPath := filepath.Join(filepath.Dir(*configPath), "daemon.sock")
+	client := tunnel.NewClient(tunnel.ClientConfig{
+		SocketPath: socketPath,
+	})
+	switch flagSet.Arg(0) {
+	case "status":
+		status, err := client.Status()
 		if err != nil {
-			log.Printf("ra: failed to start advertiser: %v", err)
-		} else {
-			log.Printf("ra: advertising on %d interfaces", len(networks))
+			log.Fatal(err)
 		}
+		printJSON(status)
+	case "health":
+		status, err := client.Health()
+		if err != nil {
+			log.Fatal(err)
+		}
+		printJSON(status)
+	case "up":
+		if err := client.Up(); err != nil {
+			log.Fatal(err)
+		}
+	case "down":
+		if err := client.Down(); err != nil {
+			log.Fatal(err)
+		}
+	case "restart":
+		if err := client.Restart(); err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatalf("unknown ctl command %q", flagSet.Arg(0))
 	}
 }
 
-func healthLoop(mgr *tunnel.Manager, store *configStore) {
-	for {
-		cfg := store.Get()
-		interval := time.Duration(cfg.Health.IntervalSec) * time.Second
-		if interval < 5*time.Second {
-			interval = 30 * time.Second
-		}
-		time.Sleep(interval)
-		cfg = store.Get()
-		if !cfg.Health.Enabled {
-			continue
-		}
-		st, err := mgr.Status()
-		if err != nil {
-			log.Printf("health: status error: %v", err)
-			continue
-		}
-		if st.TunnelUp && !st.PingOK && cfg.Health.AutoRestart {
-			log.Printf("health: ping failed, restarting tunnel")
-			if err := mgr.Restart(); err != nil {
-				log.Printf("health: restart error: %v", err)
-			}
-		}
+func executableDir() string {
+	return filepath.Dir(os.Args[0])
+}
+
+func firstArgument() string {
+	if len(os.Args) < 2 {
+		return ""
 	}
+	return os.Args[1]
+}
+
+func printJSON(value any) {
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(value); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func listenUnixSocket(path string) (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		listener.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+	return listener, nil
 }

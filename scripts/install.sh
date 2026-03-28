@@ -27,6 +27,7 @@ if [ ! -f "${INSTALL_DIR}/config.json" ]; then
     cat > "${INSTALL_DIR}/config.json" << 'CFGEOF'
 {
   "tunnel": {
+    "enabled": false,
     "broker": "he",
     "remote_endpoint": "",
     "local_ipv6": "",

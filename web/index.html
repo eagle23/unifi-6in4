@@ -130,6 +130,10 @@
       <span id="st-badge" class="badge badge-down">DOWN</span>
     </div>
     <div class="status-row">
+      <span class="status-label">Desired State</span>
+      <span class="status-value" id="st-desired">disabled</span>
+    </div>
+    <div class="status-row">
       <span class="status-label">Interface</span>
       <span class="status-value" id="st-iface">-</span>
     </div>
@@ -144,6 +148,10 @@
     <div class="status-row">
       <span class="status-label">Ping</span>
       <span class="status-value" id="st-ping">-</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Last Error</span>
+      <span class="status-value" id="st-error">-</span>
     </div>
     <div id="st-networks"></div>
   </div>
@@ -237,22 +245,16 @@
       </div>
 
       <div class="section-title">Server</div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Port</label>
-          <input id="cfg-port" type="number" value="8686">
-        </div>
-        <div class="form-group">
-          <label>WAN Interface</label>
-          <input id="cfg-wan-iface" value="ppp0">
-        </div>
+      <div class="form-group">
+        <label>WAN Interface</label>
+        <input id="cfg-wan-iface" value="ppp0">
       </div>
       <div class="form-group">
         <label>Auth Token</label>
         <input id="cfg-token" type="password" placeholder="(leave empty to disable)">
       </div>
 
-      <button type="submit" class="btn-save">Save &amp; Restart Tunnel</button>
+      <button type="submit" class="btn-save">Save Config</button>
     </form>
   </details>
 </div>
@@ -262,6 +264,8 @@
 <script>
 const API = window.location.origin;
 let authToken = localStorage.getItem('ipv6tunnel_token') || '';
+let currentTunnelEnabled = false;
+let currentServerPort = 8686;
 
 function headers() {
   const h = {'Content-Type': 'application/json'};
@@ -299,12 +303,15 @@ function toast(msg, ok) {
 async function refreshStatus() {
   try {
     const st = await api('GET', '/api/status');
+    currentTunnelEnabled = !!st.desired_enabled;
     const badge = document.getElementById('st-badge');
     badge.textContent = st.tunnel_up ? 'UP' : 'DOWN';
     badge.className = 'badge ' + (st.tunnel_up ? 'badge-up' : 'badge-down');
+    document.getElementById('st-desired').textContent = st.desired_enabled ? 'enabled' : 'disabled';
     document.getElementById('st-iface').textContent = st.interface || '-';
     document.getElementById('st-wan').textContent = st.wan_ipv4 || '-';
     document.getElementById('st-ipv6').textContent = st.local_ipv6 || '-';
+    document.getElementById('st-error').textContent = st.last_error || '-';
     if (st.ping_ok) {
       document.getElementById('st-ping').innerHTML =
         '<span style="color:var(--green)">' + st.ping_ms + 'ms</span>';
@@ -369,7 +376,8 @@ async function loadConfig() {
     document.getElementById('cfg-health-interval').value = cfg.health.interval_sec || 30;
     document.getElementById('cfg-health-target').value = cfg.health.target || '';
     document.getElementById('cfg-auto-restart').checked = cfg.health.auto_restart;
-    document.getElementById('cfg-port').value = cfg.server.port || 8686;
+    currentTunnelEnabled = !!cfg.tunnel.enabled;
+    currentServerPort = cfg.server.port || 8686;
     document.getElementById('cfg-wan-iface').value = cfg.server.wan_interface || 'ppp0';
     document.getElementById('cfg-token').value = cfg.server.auth_token || '';
   } catch (e) {
@@ -392,6 +400,7 @@ async function saveConfig(e) {
   });
   const cfg = {
     tunnel: {
+      enabled: currentTunnelEnabled,
       broker: document.getElementById('cfg-broker').value,
       remote_endpoint: document.getElementById('cfg-remote-endpoint').value,
       local_ipv6: document.getElementById('cfg-local-ipv6').value,
@@ -412,14 +421,14 @@ async function saveConfig(e) {
       auto_restart: document.getElementById('cfg-auto-restart').checked
     },
     server: {
-      port: parseInt(document.getElementById('cfg-port').value),
+      port: currentServerPort,
       wan_interface: document.getElementById('cfg-wan-iface').value,
       auth_token: document.getElementById('cfg-token').value
     }
   };
   try {
     await api('PUT', '/api/config', cfg);
-    toast('Config saved & tunnel restarted', true);
+    toast('Config saved & reconciled', true);
     if (cfg.server.auth_token !== authToken) {
       authToken = cfg.server.auth_token;
       localStorage.setItem('ipv6tunnel_token', authToken);
