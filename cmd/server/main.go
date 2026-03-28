@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -59,7 +60,7 @@ func main() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			cfg = config.Defaults()
 			if err := config.Save(*configPath, cfg); err != nil {
 				log.Fatalf("create default config: %v", err)
@@ -85,7 +86,7 @@ func main() {
 	}
 
 	if cfg.Health.Enabled {
-		go healthLoop(mgr, cfg)
+		go healthLoop(mgr, store)
 	}
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.Server.Port)
@@ -129,14 +130,14 @@ func startRA(cfg *config.Config) {
 	}
 }
 
-func healthLoop(mgr *tunnel.Manager, cfg *config.Config) {
-	interval := time.Duration(cfg.Health.IntervalSec) * time.Second
-	if interval < 5*time.Second {
-		interval = 30 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for range ticker.C {
+func healthLoop(mgr *tunnel.Manager, store *configStore) {
+	for {
+		cfg := store.Get()
+		interval := time.Duration(cfg.Health.IntervalSec) * time.Second
+		if interval < 5*time.Second {
+			interval = 30 * time.Second
+		}
+		time.Sleep(interval)
 		st, err := mgr.Status()
 		if err != nil {
 			log.Printf("health: status error: %v", err)

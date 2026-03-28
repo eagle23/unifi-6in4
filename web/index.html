@@ -269,12 +269,18 @@ function headers() {
   return h;
 }
 
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 async function api(method, path, body) {
   const opts = {method, headers: headers()};
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(API + path, opts);
   if (res.status === 401) {
-    authToken = prompt('Enter auth token:') || '';
+    const t = prompt('Enter auth token:');
+    if (!t) throw new Error('Authentication required');
+    authToken = t;
     localStorage.setItem('ipv6tunnel_token', authToken);
     return api(method, path, body);
   }
@@ -309,8 +315,8 @@ async function refreshStatus() {
     const nw = document.getElementById('st-networks');
     if (st.networks && st.networks.length > 0) {
       nw.innerHTML = st.networks.map(n =>
-        '<div class="status-row"><span class="status-label">' + n.interface +
-        '</span><span class="status-value">' + n.prefix + '</span></div>'
+        '<div class="status-row"><span class="status-label">' + esc(n.interface) +
+        '</span><span class="status-value">' + esc(n.prefix) + '</span></div>'
       ).join('');
     } else {
       nw.innerHTML = '';
@@ -338,9 +344,9 @@ function addNetwork(iface, prefix, comment) {
   const row = document.createElement('div');
   row.className = 'network-entry';
   row.innerHTML =
-    '<input placeholder="br0" value="' + (iface||'') + '">' +
-    '<input placeholder="2001:470:xxxx:1::/64" value="' + (prefix||'') + '">' +
-    '<input placeholder="Name" value="' + (comment||'') + '">' +
+    '<input placeholder="br0" value="' + esc(iface||'') + '">' +
+    '<input placeholder="2001:470:xxxx:1::/64" value="' + esc(prefix||'') + '">' +
+    '<input placeholder="Name" value="' + esc(comment||'') + '">' +
     '<span class="btn-del" onclick="this.parentElement.remove()">x</span>';
   list.appendChild(row);
 }
@@ -424,8 +430,7 @@ async function saveConfig(e) {
   }
 }
 
-refreshStatus();
-loadConfig();
+refreshStatus().then(() => loadConfig());
 setInterval(refreshStatus, 5000);
 </script>
 </body>

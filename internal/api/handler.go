@@ -33,7 +33,6 @@ func NewHandler(tc TunnelController, cs ConfigStore) *Handler {
 	return &Handler{tunnel: tc, config: cs}
 }
 
-// HandleGetStatus writes the current tunnel status as JSON.
 func (h *Handler) HandleGetStatus(w http.ResponseWriter, r *http.Request) {
 	st, err := h.tunnel.Status()
 	if err != nil {
@@ -43,39 +42,31 @@ func (h *Handler) HandleGetStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
-// HandleTunnelUp brings the tunnel up and responds with {"status":"ok"}.
+func (h *Handler) handleTunnelCommand(w http.ResponseWriter, fn func() error) {
+	if err := fn(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (h *Handler) HandleTunnelUp(w http.ResponseWriter, r *http.Request) {
-	if err := h.tunnel.Up(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	h.handleTunnelCommand(w, h.tunnel.Up)
 }
 
-// HandleTunnelDown brings the tunnel down and responds with {"status":"ok"}.
 func (h *Handler) HandleTunnelDown(w http.ResponseWriter, r *http.Request) {
-	if err := h.tunnel.Down(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	h.handleTunnelCommand(w, h.tunnel.Down)
 }
 
-// HandleTunnelRestart restarts the tunnel and responds with {"status":"ok"}.
 func (h *Handler) HandleTunnelRestart(w http.ResponseWriter, r *http.Request) {
-	if err := h.tunnel.Restart(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	h.handleTunnelCommand(w, h.tunnel.Restart)
 }
 
-// HandleGetConfig writes the current config as JSON.
 func (h *Handler) HandleGetConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.config.Get())
 }
 
-// HandleUpdateConfig decodes a Config from the request body, saves it, and restarts the tunnel.
+// Saves config and restarts tunnel.
 func (h *Handler) HandleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	var cfg config.Config
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {

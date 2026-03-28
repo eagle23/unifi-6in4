@@ -105,8 +105,8 @@ func (a *Advertiser) loop(ctx context.Context, ce connEntry, interval time.Durat
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	allNodes := netip.MustParseAddr("ff02::1")
+	msg := BuildRA(ce.prefix, a.dns)
 	for {
-		msg := BuildRA(ce.prefix, a.dns)
 		if err := ce.conn.WriteTo(msg, nil, allNodes); err != nil {
 			log.Printf("ra: send on %s: %v", ce.iface.Name, err)
 		}

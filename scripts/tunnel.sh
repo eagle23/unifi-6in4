@@ -22,34 +22,49 @@ get_json() {
         || jq -r "$2" "$CONFIG_FILE" 2>/dev/null
 }
 
-get_wan_ip() {
-    local wan_iface
-    wan_iface=$(get_json "d['server']['wan_interface']" '.server.wan_interface')
-    ip -4 addr show "$wan_iface" | grep -oP 'inet \K[0-9.]+'
+get_bool() {
+    local raw
+    raw=$(get_json "$1" "$2" 2>/dev/null || echo "false")
+    case "$raw" in
+        true|True|1) echo "true" ;;
+        *) echo "false" ;;
+    esac
+}
+
+# Iterates over LAN networks, calling $1 iface prefix_addr prefix_len for each
+foreach_lan_network() {
+    local callback="$1"
+    local lan_enabled
+    lan_enabled=$(get_bool "d['lan']['enabled']" '.lan.enabled')
+    [ "$lan_enabled" = "true" ] || return 0
+    local count
+    count=$(get_json "len(d['lan']['networks'])" '.lan.networks | length' 2>/dev/null || echo "0")
+    for i in $(seq 0 $((count - 1))); do
+        local iface prefix
+        iface=$(get_json "d['lan']['networks'][$i]['interface']" ".lan.networks[$i].interface")
+        prefix=$(get_json "d['lan']['networks'][$i]['prefix']" ".lan.networks[$i].prefix")
+        "$callback" "$iface" "${prefix%/*}" "${prefix##*/}"
+    done
 }
 
 do_up() {
     read_config
-    local remote_endpoint local_ipv6 remote_ipv6 ttl mtu wan_ip lan_enabled
+    local remote_endpoint local_ipv6 ttl mtu wan_iface wan_ip
 
     remote_endpoint=$(get_json "d['tunnel']['remote_endpoint']" '.tunnel.remote_endpoint')
     local_ipv6=$(get_json "d['tunnel']['local_ipv6']" '.tunnel.local_ipv6')
     ttl=$(get_json "d['tunnel']['ttl']" '.tunnel.ttl')
     mtu=$(get_json "d['tunnel']['mtu']" '.tunnel.mtu')
-    wan_ip=$(get_wan_ip)
-    lan_enabled=$(get_json "d['lan']['enabled']" '.lan.enabled')
+    wan_iface=$(get_json "d['server']['wan_interface']" '.server.wan_interface')
+    wan_ip=$(ip -4 addr show "$wan_iface" | grep -oP 'inet \K[0-9.]+')
 
     log_message "bringing tunnel up: remote=$remote_endpoint local=$wan_ip"
 
-    # Load kernel module
     modprobe sit 2>/dev/null || true
 
     # Route to broker endpoint via WAN (bypass VPN PBR)
-    local wan_iface
-    wan_iface=$(get_json "d['server']['wan_interface']" '.server.wan_interface')
     ip route add "${remote_endpoint}/32" dev "$wan_iface" src "$wan_ip" 2>/dev/null || true
 
-    # Create tunnel
     ip tunnel add "$TUNNEL_IFACE" mode sit \
         remote "$remote_endpoint" \
         local "$wan_ip" \
@@ -57,33 +72,12 @@ do_up() {
 
     ip link set "$TUNNEL_IFACE" mtu "$mtu"
     ip link set "$TUNNEL_IFACE" up
-
-    # Assign tunnel IPv6 address
     ip -6 addr add "$local_ipv6" dev "$TUNNEL_IFACE"
-
-    # Default IPv6 route via tunnel
     ip -6 route add ::/0 dev "$TUNNEL_IFACE"
-
-    # Enable IPv6 forwarding
     sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null
 
-    # Assign prefixes to LAN interfaces
-    if [ "$lan_enabled" = "true" ] || [ "$lan_enabled" = "True" ]; then
-        local count
-        count=$(get_json "len(d['lan']['networks'])" '.lan.networks | length')
-        for i in $(seq 0 $((count - 1))); do
-            local iface prefix
-            iface=$(get_json "d['lan']['networks'][$i]['interface']" ".lan.networks[$i].interface")
-            prefix=$(get_json "d['lan']['networks'][$i]['prefix']" ".lan.networks[$i].prefix")
-            # Extract prefix address part (e.g., 2001:db8:1:: from 2001:db8:1::/64)
-            local prefix_addr
-            prefix_addr=$(echo "$prefix" | sed 's|/.*||')
-            local prefix_len
-            prefix_len=$(echo "$prefix" | sed 's|.*/||')
-            ip -6 addr add "${prefix_addr}1/${prefix_len}" dev "$iface" 2>/dev/null || true
-            log_message "assigned ${prefix_addr}1/${prefix_len} to $iface"
-        done
-    fi
+    _add_prefix() { ip -6 addr add "${2}1/${3}" dev "$1" 2>/dev/null || true; log_message "assigned ${2}1/${3} to $1"; }
+    foreach_lan_network _add_prefix
 
     # Firewall rules (nftables)
     nft add table ip filter 2>/dev/null || true
@@ -102,37 +96,13 @@ do_up() {
 do_down() {
     log_message "bringing tunnel down"
 
-    # Remove firewall rules
     nft delete chain ip filter ipv6tunnel-input 2>/dev/null || true
     nft delete chain ip6 filter ipv6tunnel-forward 2>/dev/null || true
 
-    # Remove LAN prefixes
     if [ -f "$CONFIG_FILE" ]; then
-        local lan_enabled
-        lan_enabled=$(get_json "d['lan']['enabled']" '.lan.enabled' 2>/dev/null || echo "false")
-        if [ "$lan_enabled" = "true" ] || [ "$lan_enabled" = "True" ]; then
-            local count
-            count=$(get_json "len(d['lan']['networks'])" '.lan.networks | length' 2>/dev/null || echo "0")
-            for i in $(seq 0 $((count - 1))); do
-                local iface prefix
-                iface=$(get_json "d['lan']['networks'][$i]['interface']" ".lan.networks[$i].interface")
-                prefix=$(get_json "d['lan']['networks'][$i]['prefix']" ".lan.networks[$i].prefix")
-                local prefix_addr prefix_len
-                prefix_addr=$(echo "$prefix" | sed 's|/.*||')
-                prefix_len=$(echo "$prefix" | sed 's|.*/||')
-                ip -6 addr del "${prefix_addr}1/${prefix_len}" dev "$iface" 2>/dev/null || true
-            done
-        fi
-    fi
+        _del_prefix() { ip -6 addr del "${2}1/${3}" dev "$1" 2>/dev/null || true; }
+        foreach_lan_network _del_prefix
 
-    # Remove default IPv6 route
-    ip -6 route del ::/0 dev "$TUNNEL_IFACE" 2>/dev/null || true
-
-    # Remove tunnel
-    ip tunnel del "$TUNNEL_IFACE" 2>/dev/null || true
-
-    # Remove explicit route to broker
-    if [ -f "$CONFIG_FILE" ]; then
         local remote_endpoint wan_iface
         remote_endpoint=$(get_json "d['tunnel']['remote_endpoint']" '.tunnel.remote_endpoint' 2>/dev/null || echo "")
         wan_iface=$(get_json "d['server']['wan_interface']" '.server.wan_interface' 2>/dev/null || echo "ppp0")
@@ -140,6 +110,9 @@ do_down() {
             ip route del "${remote_endpoint}/32" dev "$wan_iface" 2>/dev/null || true
         fi
     fi
+
+    ip -6 route del ::/0 dev "$TUNNEL_IFACE" 2>/dev/null || true
+    ip tunnel del "$TUNNEL_IFACE" 2>/dev/null || true
 
     log_message "tunnel down"
 }
@@ -162,11 +135,12 @@ do_status() {
     fi
 
     if [ -f "$CONFIG_FILE" ]; then
-        wan_ip=$(get_wan_ip 2>/dev/null || echo "")
+        local wan_iface
+        wan_iface=$(get_json "d['server']['wan_interface']" '.server.wan_interface' 2>/dev/null || echo "ppp0")
+        wan_ip=$(ip -4 addr show "$wan_iface" 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "")
         local_ipv6=$(get_json "d['tunnel']['local_ipv6']" '.tunnel.local_ipv6' 2>/dev/null || echo "")
     fi
 
-    # Ping check
     if [ "$tunnel_up" = "true" ] && [ -f "$CONFIG_FILE" ]; then
         local target
         target=$(get_json "d['health']['target']" '.health.target' 2>/dev/null || echo "2001:4860:4860::8888")
@@ -178,12 +152,11 @@ do_status() {
         fi
     fi
 
-    # Build networks JSON
     local networks_json="[]"
     if [ -f "$CONFIG_FILE" ]; then
         local lan_enabled
-        lan_enabled=$(get_json "d['lan']['enabled']" '.lan.enabled' 2>/dev/null || echo "false")
-        if [ "$lan_enabled" = "true" ] || [ "$lan_enabled" = "True" ]; then
+        lan_enabled=$(get_bool "d['lan']['enabled']" '.lan.enabled')
+        if [ "$lan_enabled" = "true" ]; then
             local count
             count=$(get_json "len(d['lan']['networks'])" '.lan.networks | length' 2>/dev/null || echo "0")
             networks_json="["
@@ -214,7 +187,6 @@ do_boot() {
     fi
 }
 
-# Main
 case "${1:-}" in
     up)      do_up ;;
     down)    do_down ;;
