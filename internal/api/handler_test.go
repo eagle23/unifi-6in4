@@ -136,35 +136,38 @@ func TestHandleUpdateConfig(t *testing.T) {
 	}
 }
 
-func TestAuthMiddlewareRejectsNoToken(t *testing.T) {
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	handler := api.AuthMiddleware("secret-token", inner)
+func TestServerAuthRejectsNoToken(t *testing.T) {
+	mock := &mockTunnelManager{status: &tunnel.Status{}}
+	h := api.NewHandler(mock, &mockConfigStore{cfg: config.Defaults()})
+	srv := api.NewServer(h, func() string { return "secret-token" }, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	srv.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
 	}
 }
 
-func TestAuthMiddlewareAcceptsValidToken(t *testing.T) {
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	handler := api.AuthMiddleware("secret-token", inner)
+func TestServerAuthAcceptsValidToken(t *testing.T) {
+	mock := &mockTunnelManager{status: &tunnel.Status{}}
+	h := api.NewHandler(mock, &mockConfigStore{cfg: config.Defaults()})
+	srv := api.NewServer(h, func() string { return "secret-token" }, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	req.Header.Set("Authorization", "Bearer secret-token")
 	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	srv.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
 	}
 }
 
-func TestAuthMiddlewareSkipsWhenEmpty(t *testing.T) {
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	handler := api.AuthMiddleware("", inner)
+func TestServerAuthSkipsWhenEmpty(t *testing.T) {
+	mock := &mockTunnelManager{status: &tunnel.Status{}}
+	h := api.NewHandler(mock, &mockConfigStore{cfg: config.Defaults()})
+	srv := api.NewServer(h, func() string { return "" }, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	srv.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d (no auth when token empty)", w.Code, http.StatusOK)
 	}

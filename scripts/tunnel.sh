@@ -39,6 +39,7 @@ foreach_lan_network() {
     [ "$lan_enabled" = "true" ] || return 0
     local count
     count=$(get_json "len(d['lan']['networks'])" '.lan.networks | length' 2>/dev/null || echo "0")
+    [ "$count" -gt 0 ] || return 0
     for i in $(seq 0 $((count - 1))); do
         local iface prefix
         iface=$(get_json "d['lan']['networks'][$i]['interface']" ".lan.networks[$i].interface")
@@ -159,6 +160,7 @@ do_status() {
         if [ "$lan_enabled" = "true" ]; then
             local count
             count=$(get_json "len(d['lan']['networks'])" '.lan.networks | length' 2>/dev/null || echo "0")
+            if [ "$count" -gt 0 ]; then
             networks_json="["
             for i in $(seq 0 $((count - 1))); do
                 local iface prefix
@@ -168,6 +170,7 @@ do_status() {
                 networks_json="${networks_json}{\"interface\":\"${iface}\",\"prefix\":\"${prefix}\"}"
             done
             networks_json="${networks_json}]"
+            fi
         fi
     fi
 
@@ -178,13 +181,15 @@ STATUSEOF
 
 do_boot() {
     log_message "boot: starting tunnel and server"
-    do_up
+    # Start server FIRST so UI is always reachable even if tunnel fails
     if [ -x "$SERVER_BIN" ]; then
         "$SERVER_BIN" &
         log_message "server started (pid $!)"
     else
         log_message "server binary not found: $SERVER_BIN"
     fi
+    # Tunnel up is best-effort at boot — don't kill the script on failure
+    do_up || log_message "tunnel up failed at boot (fix via UI at port 8686)"
 }
 
 case "${1:-}" in

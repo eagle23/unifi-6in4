@@ -6,15 +6,11 @@ REMOTE_DIR=/data/ipv6-tunnel
 .PHONY: build test deploy clean install
 
 build:
-	mkdir -p cmd/server/web
-	cp web/index.html cmd/server/web/
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
 		-ldflags="-s -w" \
 		-o bin/$(BINARY_NAME) ./cmd/server/
 
 test:
-	mkdir -p cmd/server/web
-	cp web/index.html cmd/server/web/
 	go test ./... -v
 
 deploy: build
@@ -34,4 +30,4 @@ install: build
 	ssh $(ROUTER_USER)@$(ROUTER_HOST) "chmod +x /tmp/install.sh && /tmp/install.sh"
 
 clean:
-	rm -rf bin/ cmd/server/web/
+	rm -rf bin/

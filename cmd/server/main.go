@@ -1,11 +1,9 @@
 package main
 
 import (
-	"embed"
 	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
 	"log"
 	"net/http"
 	"net/netip"
@@ -19,9 +17,6 @@ import (
 	"github.com/eagle23/unifi-tunnel-4to6/internal/ra"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/tunnel"
 )
-
-//go:embed web
-var webContent embed.FS
 
 type configStore struct {
 	mu   sync.RWMutex
@@ -75,19 +70,22 @@ func main() {
 	mgr := tunnel.NewManager(*scriptPath)
 	handler := api.NewHandler(mgr, store)
 
-	webFS, err := fs.Sub(webContent, "web")
-	if err != nil {
-		log.Fatalf("embed web: %v", err)
+	webDir := filepath.Join(baseDir, "web")
+	var webFS http.FileSystem
+	if info, err := os.Stat(webDir); err == nil && info.IsDir() {
+		webFS = http.Dir(webDir)
+	} else {
+		log.Printf("web directory not found at %s, UI will not be served", webDir)
 	}
-	srv := api.NewServer(handler, cfg.Server.AuthToken, webFS)
+	getToken := func() string { return store.Get().Server.AuthToken }
+	srv := api.NewServer(handler, getToken, webFS)
 
 	if cfg.LAN.Enabled && len(cfg.LAN.Networks) > 0 {
 		startRA(cfg)
 	}
 
-	if cfg.Health.Enabled {
-		go healthLoop(mgr, store)
-	}
+	// Always start healthLoop — it checks Health.Enabled each iteration
+	go healthLoop(mgr, store)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.Server.Port)
 	log.Printf("listening on %s", addr)
@@ -138,6 +136,10 @@ func healthLoop(mgr *tunnel.Manager, store *configStore) {
 			interval = 30 * time.Second
 		}
 		time.Sleep(interval)
+		cfg = store.Get()
+		if !cfg.Health.Enabled {
+			continue
+		}
 		st, err := mgr.Status()
 		if err != nil {
 			log.Printf("health: status error: %v", err)

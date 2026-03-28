@@ -1,15 +1,16 @@
 package api
 
 import (
-	"io/fs"
 	"net/http"
 	"strings"
 )
 
-// AuthMiddleware wraps next with Bearer token authentication.
-// If token is empty, all requests pass through without checking.
-func AuthMiddleware(token string, next http.Handler) http.Handler {
+// TokenFunc returns the current auth token. Called on every request so config changes take effect.
+type TokenFunc func() string
+
+func authMiddleware(getToken TokenFunc, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := getToken()
 		if token == "" {
 			next.ServeHTTP(w, r)
 			return
@@ -23,19 +24,19 @@ func AuthMiddleware(token string, next http.Handler) http.Handler {
 	})
 }
 
-// NewServer builds an http.Handler with all API routes, auth, and optional static file serving.
-func NewServer(h *Handler, token string, webFS fs.FS) http.Handler {
+func NewServer(h *Handler, getToken TokenFunc, webFS http.FileSystem) http.Handler {
 	mux := http.NewServeMux()
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("GET /api/status", h.HandleGetStatus)
 	apiMux.HandleFunc("GET /api/config", h.HandleGetConfig)
 	apiMux.HandleFunc("PUT /api/config", h.HandleUpdateConfig)
+	apiMux.HandleFunc("GET /api/health", h.HandleGetStatus)
 	apiMux.HandleFunc("POST /api/tunnel/up", h.HandleTunnelUp)
 	apiMux.HandleFunc("POST /api/tunnel/down", h.HandleTunnelDown)
 	apiMux.HandleFunc("POST /api/tunnel/restart", h.HandleTunnelRestart)
-	mux.Handle("/api/", AuthMiddleware(token, apiMux))
+	mux.Handle("/api/", authMiddleware(getToken, apiMux))
 	if webFS != nil {
-		mux.Handle("/", http.FileServer(http.FS(webFS)))
+		mux.Handle("/", http.FileServer(webFS))
 	}
 	return corsMiddleware(mux)
 }
