@@ -13,6 +13,8 @@ build:
 		-o bin/$(BINARY_NAME) ./cmd/server/
 
 test:
+	mkdir -p cmd/server/web
+	cp web/index.html cmd/server/web/
 	go test ./... -v
 
 deploy: build
