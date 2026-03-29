@@ -1,7 +1,9 @@
 package control
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/eagle23/unifi-tunnel-4to6/internal/config"
 )
@@ -11,12 +13,17 @@ type fakeBackend struct {
 	observation    Observation
 	probeResult    ProbeResult
 	reconcileErr   error
+	reconcileErrs  []error
 	observeErr     error
 	probeErr       error
 }
 
 func (f *fakeBackend) Reconcile(input ReconcileInput) error {
 	f.reconcileCalls = append(f.reconcileCalls, input)
+	callIndex := len(f.reconcileCalls) - 1
+	if callIndex < len(f.reconcileErrs) {
+		return f.reconcileErrs[callIndex]
+	}
 	return f.reconcileErr
 }
 
@@ -133,4 +140,59 @@ func TestServiceValidConfigTransitionsToReady(t *testing.T) {
 	if !backend.reconcileCalls[len(backend.reconcileCalls)-1].Config.Tunnel.Enabled {
 		t.Error("last reconcile did not enable tunnel")
 	}
+}
+
+func TestServiceRetriesFailedInitialReconcileInBackground(t *testing.T) {
+	dir := t.TempDir()
+	configPath := dir + "/config.json"
+	statePath := dir + "/state.json"
+	cfg := config.Defaults()
+	cfg.Tunnel.Enabled = true
+	cfg.Tunnel.RemoteEndpoint = "216.66.88.98"
+	cfg.Tunnel.LocalIPv6 = "2001:470::2/64"
+	cfg.Health.Enabled = false
+	cfg.Health.IntervalSec = 5
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	backend := &fakeBackend{
+		reconcileErrs: []error{errors.New("read WAN IPv4: device not ready"), nil},
+		observation:   Observation{TunnelUp: true, WANIPv4: "78.36.199.233"},
+	}
+	service, err := NewService(ServiceParams{
+		ConfigPath: configPath,
+		StatePath:  statePath,
+		Backend:    backend,
+	})
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	defer service.Stop()
+	if err := service.Start(); err == nil {
+		t.Fatal("Start() error = nil, want initial reconcile failure")
+	}
+	deadline := time.Now().Add(7 * time.Second)
+	for time.Now().Before(deadline) {
+		status, statusErr := service.Status()
+		if statusErr != nil {
+			t.Fatalf("Status() error: %v", statusErr)
+		}
+		if status.ReconcileState == "ready" {
+			if len(backend.reconcileCalls) < 2 {
+				t.Fatalf("reconcileCalls = %d, want at least 2", len(backend.reconcileCalls))
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("service did not recover to ready state, last reconcile state = %q", mustStatusState(t, service))
+}
+
+func mustStatusState(t *testing.T, service *Service) string {
+	t.Helper()
+	status, err := service.Status()
+	if err != nil {
+		t.Fatalf("Status() error: %v", err)
+	}
+	return status.ReconcileState
 }

@@ -64,13 +64,13 @@ func NewService(params ServiceParams) (*Service, error) {
 	}, nil
 }
 
-// Start performs the initial reconcile and launches background health checks.
+// Start launches background workers and performs the initial reconcile.
 func (s *Service) Start() error {
+	s.wg.Add(1)
+	go s.healthLoop()
 	if err := s.reconcile(false); err != nil {
 		return err
 	}
-	s.wg.Add(1)
-	go s.healthLoop()
 	return nil
 }
 
@@ -179,8 +179,24 @@ func (s *Service) healthLoop() {
 			timer.Stop()
 			return
 		}
+		if s.shouldRetryReconcile() {
+			_ = s.reconcile(true)
+			continue
+		}
 		_, _ = s.runHealthCheck(true)
 	}
+}
+
+func (s *Service) shouldRetryReconcile() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.config.Tunnel.Enabled {
+		return false
+	}
+	if s.state.ReconcileState == tunnel.ReconcileReady {
+		return false
+	}
+	return s.config.Validate() == nil
 }
 
 func (s *Service) runHealthCheck(allowAutoRestart bool) (*tunnel.Status, error) {

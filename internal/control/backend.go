@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/eagle23/unifi-tunnel-4to6/internal/config"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/tunnel"
@@ -20,10 +21,12 @@ const (
 )
 
 var (
-	ipv4AddressPattern = regexp.MustCompile(`inet (\d+\.\d+\.\d+\.\d+)`)
+	ipv4AddressPattern  = regexp.MustCompile(`inet (\d+\.\d+\.\d+\.\d+)`)
 	interfaceMTUPattern = regexp.MustCompile(`mtu (\d+)`)
-	pingTimePattern    = regexp.MustCompile(`time=([0-9.]+)`)
+	pingTimePattern     = regexp.MustCompile(`time=([0-9.]+)`)
 )
+
+var sleepFn = time.Sleep
 
 // Backend observes and applies the dataplane state.
 type Backend interface {
@@ -126,7 +129,14 @@ func (b *SystemBackend) Reconcile(input ReconcileInput) error {
 		return err
 	}
 	if input.Config.LAN.Enabled {
+		managedInterfaces := make(map[string]struct{}, len(input.Config.LAN.Networks))
 		for _, network := range input.Config.LAN.Networks {
+			if _, ok := managedInterfaces[network.Interface]; !ok {
+				if err := b.ensureLANInterfaceReady(network.Interface); err != nil {
+					return err
+				}
+				managedInterfaces[network.Interface] = struct{}{}
+			}
 			gatewayAddress, err := gatewayForPrefix(network.Prefix)
 			if err != nil {
 				return err
@@ -171,6 +181,28 @@ func (b *SystemBackend) resolveTunnelMTU(configuredMTU int, wanInterface string)
 		return 0, fmt.Errorf("resolved tunnel MTU %d is below IPv6 minimum %d", resolvedMTU, minimumIPv6MTU)
 	}
 	return resolvedMTU, nil
+}
+
+func (b *SystemBackend) ensureLANInterfaceReady(interfaceName string) error {
+	if err := b.run("sysctl", "-w", fmt.Sprintf("net.ipv6.conf.%s.accept_dad=0", interfaceName)); err != nil {
+		return err
+	}
+	output, err := b.runner.CombinedOutput("ip", "-6", "addr", "show", "dev", interfaceName)
+	if err != nil {
+		return fmt.Errorf("read IPv6 addresses on %s: %w", interfaceName, err)
+	}
+	if !hasProblematicLinkLocal(string(output)) {
+		return nil
+	}
+	if err := b.run("ip", "link", "set", "dev", interfaceName, "down"); err != nil {
+		return err
+	}
+	sleepFn(1 * time.Second)
+	if err := b.run("ip", "link", "set", "dev", interfaceName, "up"); err != nil {
+		return err
+	}
+	sleepFn(2 * time.Second)
+	return nil
 }
 
 // Observe reads the lightweight runtime state.
@@ -256,6 +288,10 @@ func (b *SystemBackend) getInterfaceMTU(interfaceName string) (int, error) {
 		return 0, fmt.Errorf("parse MTU on %s: %w", interfaceName, err)
 	}
 	return mtuValue, nil
+}
+
+func hasProblematicLinkLocal(output string) bool {
+	return strings.Contains(output, "scope link") && (strings.Contains(output, "dadfailed") || strings.Contains(output, "tentative"))
 }
 
 func (b *SystemBackend) run(name string, args ...string) error {

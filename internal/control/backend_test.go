@@ -3,6 +3,7 @@ package control
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eagle23/unifi-tunnel-4to6/internal/config"
 )
@@ -73,6 +74,62 @@ func TestReconcileAutoMTUUsesResolvedValue(t *testing.T) {
 	}
 	if !containsCommand(runner.calls, "ip link set sit-6in4 mtu 1472") {
 		t.Fatalf("expected mtu command with 1472, calls = %v", runner.calls)
+	}
+}
+
+func TestEnsureLANInterfaceReadyDisablesDADAndBouncesProblematicInterface(t *testing.T) {
+	runner := &fakeCommandRunner{
+		outputs: map[string][]byte{
+			"ip -6 addr show dev br0": []byte("34: br0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500\n    inet6 fe80::aa9c:6cff:fe82:1a45/64 scope link dadfailed tentative\n"),
+		},
+	}
+	backend := NewSystemBackendWithRunner(runner)
+	originalSleepFn := sleepFn
+	sleepFn = func(duration time.Duration) {}
+	defer func() {
+		sleepFn = originalSleepFn
+	}()
+	if err := backend.ensureLANInterfaceReady("br0"); err != nil {
+		t.Fatalf("ensureLANInterfaceReady() error: %v", err)
+	}
+	if !containsCommand(runner.calls, "sysctl -w net.ipv6.conf.br0.accept_dad=0") {
+		t.Fatalf("expected accept_dad override, calls = %v", runner.calls)
+	}
+	if !containsCommand(runner.calls, "ip link set dev br0 down") {
+		t.Fatalf("expected br0 down bounce, calls = %v", runner.calls)
+	}
+	if !containsCommand(runner.calls, "ip link set dev br0 up") {
+		t.Fatalf("expected br0 up bounce, calls = %v", runner.calls)
+	}
+}
+
+func TestEnsureLANInterfaceReadySkipsBounceWhenLinkLocalIsHealthy(t *testing.T) {
+	runner := &fakeCommandRunner{
+		outputs: map[string][]byte{
+			"ip -6 addr show dev br0": []byte("34: br0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500\n    inet6 fe80::aa9c:6cff:fe82:1a45/64 scope link\n"),
+		},
+	}
+	backend := NewSystemBackendWithRunner(runner)
+	if err := backend.ensureLANInterfaceReady("br0"); err != nil {
+		t.Fatalf("ensureLANInterfaceReady() error: %v", err)
+	}
+	if containsCommand(runner.calls, "ip link set dev br0 down") || containsCommand(runner.calls, "ip link set dev br0 up") {
+		t.Fatalf("did not expect interface bounce, calls = %v", runner.calls)
+	}
+}
+
+func TestHasProblematicLinkLocalDetectsOnlyBrokenLinkLocalAddresses(t *testing.T) {
+	if !hasProblematicLinkLocal("inet6 fe80::1/64 scope link dadfailed tentative") {
+		t.Fatal("expected dadfailed tentative link-local to be problematic")
+	}
+	if !hasProblematicLinkLocal("inet6 fe80::1/64 scope link tentative") {
+		t.Fatal("expected tentative link-local to be problematic")
+	}
+	if hasProblematicLinkLocal("inet6 fe80::1/64 scope link") {
+		t.Fatal("expected healthy link-local to be accepted")
+	}
+	if hasProblematicLinkLocal("inet6 2001:470::1/64 scope global dadfailed tentative") {
+		t.Fatal("expected non-link-local addresses to be ignored")
 	}
 }
 
