@@ -34,6 +34,13 @@ func TestBuildRA(t *testing.T) {
 	if _, ok := msg.Options[1].(*ndp.MTU); !ok {
 		t.Fatalf("Options[1] type = %T, want *ndp.MTU", msg.Options[1])
 	}
+	mtuOption, ok := msg.Options[1].(*ndp.MTU)
+	if !ok {
+		t.Fatalf("Options[1] type = %T, want *ndp.MTU", msg.Options[1])
+	}
+	if mtuOption.MTU != 1472 {
+		t.Fatalf("Options[1].MTU = %d, want 1472", mtuOption.MTU)
+	}
 	if _, ok := msg.Options[2].(*ndp.PrefixInformation); !ok {
 		t.Fatalf("Options[2] type = %T, want *ndp.PrefixInformation", msg.Options[2])
 	}

@@ -15,6 +15,10 @@ ensure_server_binary() {
     fi
 }
 
+is_server_running() {
+    pgrep -f "^${SERVER_BIN}($| )" >/dev/null 2>&1
+}
+
 run_ctl() {
     ensure_server_binary
     exec "$SERVER_BIN" ctl "$@"
@@ -22,11 +26,11 @@ run_ctl() {
 
 start_server() {
     ensure_server_binary
-    if pgrep -f "$SERVER_BIN" >/dev/null 2>&1; then
+    if is_server_running; then
         log_message "server already running"
         return 0
     fi
-    "$SERVER_BIN" serve >/dev/null 2>&1 &
+    nohup "$SERVER_BIN" serve >/dev/null 2>&1 </dev/null &
     log_message "server started (pid $!)"
 }
 

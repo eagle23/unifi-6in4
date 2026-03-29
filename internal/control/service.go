@@ -248,6 +248,10 @@ func (s *Service) reconcile(force bool) error {
 	}
 	s.state.WANIPv4 = observation.WANIPv4
 	s.state.LocalIPv6 = cfg.Tunnel.LocalIPv6
+	s.state.EffectiveMTU = 0
+	if len(validationReasons) == 0 && cfg.Tunnel.Enabled && cfg.Tunnel.MTU > 0 {
+		s.state.EffectiveMTU = cfg.Tunnel.MTU
+	}
 	s.state.Networks = buildAppliedState(cfg).Networks
 	s.state.TunnelUp = observation.TunnelUp
 	s.state.PingOK = probeResult.PingOK

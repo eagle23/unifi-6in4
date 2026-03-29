@@ -21,6 +21,7 @@ const (
 
 var (
 	ipv4AddressPattern = regexp.MustCompile(`inet (\d+\.\d+\.\d+\.\d+)`)
+	interfaceMTUPattern = regexp.MustCompile(`mtu (\d+)`)
 	pingTimePattern    = regexp.MustCompile(`time=([0-9.]+)`)
 )
 
@@ -97,6 +98,11 @@ func (b *SystemBackend) Reconcile(input ReconcileInput) error {
 	if err != nil {
 		return err
 	}
+	resolvedMTU, err := b.resolveTunnelMTU(input.Config.Tunnel.MTU, input.Config.Server.WANInterface)
+	if err != nil {
+		return err
+	}
+	input.Config.Tunnel.MTU = resolvedMTU
 	b.runBestEffort("modprobe", "sit")
 	if err := b.run("ip", "route", "replace", input.Config.Tunnel.RemoteEndpoint+"/32", "dev", input.Config.Server.WANInterface, "src", wanIP); err != nil {
 		return err
@@ -148,6 +154,23 @@ func (b *SystemBackend) Reconcile(input ReconcileInput) error {
 	b.runBestEffort("ip6tables", "-t", "mangle", "-A", iptablesChainMSS, "-o", tunnel.InterfaceName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu")
 	b.ensureJumpTable("ip6tables", "mangle", "FORWARD", iptablesChainMSS)
 	return nil
+}
+
+func (b *SystemBackend) resolveTunnelMTU(configuredMTU int, wanInterface string) (int, error) {
+	if configuredMTU > 0 {
+		return configuredMTU, nil
+	}
+	wanMTU, err := b.getInterfaceMTU(wanInterface)
+	if err != nil {
+		return 0, err
+	}
+	const tunnelOverhead = 20
+	const minimumIPv6MTU = 1280
+	resolvedMTU := wanMTU - tunnelOverhead
+	if resolvedMTU < minimumIPv6MTU {
+		return 0, fmt.Errorf("resolved tunnel MTU %d is below IPv6 minimum %d", resolvedMTU, minimumIPv6MTU)
+	}
+	return resolvedMTU, nil
 }
 
 // Observe reads the lightweight runtime state.
@@ -217,6 +240,22 @@ func (b *SystemBackend) getWANIPv4(interfaceName string) (string, error) {
 		return "", fmt.Errorf("WAN IPv4 not found on %s", interfaceName)
 	}
 	return match[1], nil
+}
+
+func (b *SystemBackend) getInterfaceMTU(interfaceName string) (int, error) {
+	output, err := b.runner.CombinedOutput("ip", "link", "show", interfaceName)
+	if err != nil {
+		return 0, fmt.Errorf("read interface MTU: %w", err)
+	}
+	match := interfaceMTUPattern.FindStringSubmatch(string(output))
+	if len(match) < 2 {
+		return 0, fmt.Errorf("MTU not found on %s", interfaceName)
+	}
+	mtuValue, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0, fmt.Errorf("parse MTU on %s: %w", interfaceName, err)
+	}
+	return mtuValue, nil
 }
 
 func (b *SystemBackend) run(name string, args ...string) error {

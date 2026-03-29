@@ -79,11 +79,11 @@ func TestDefaults(t *testing.T) {
 	if cfg.Tunnel.TTL != 255 {
 		t.Errorf("TTL = %d, want 255", cfg.Tunnel.TTL)
 	}
-	if cfg.Tunnel.MTU != 1480 {
-		t.Errorf("MTU = %d, want 1480", cfg.Tunnel.MTU)
+	if cfg.Tunnel.MTU != 0 {
+		t.Errorf("MTU = %d, want 0", cfg.Tunnel.MTU)
 	}
-	if cfg.Server.Port != 8686 {
-		t.Errorf("Port = %d, want 8686", cfg.Server.Port)
+	if cfg.Server.Port != 9086 {
+		t.Errorf("Port = %d, want 9086", cfg.Server.Port)
 	}
 	if cfg.Server.WANInterface != "ppp0" {
 		t.Errorf("WANInterface = %q, want %q", cfg.Server.WANInterface, "ppp0")

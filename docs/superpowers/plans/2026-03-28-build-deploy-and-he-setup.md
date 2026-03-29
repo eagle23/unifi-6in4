@@ -24,7 +24,7 @@
 - state: `/data/ipv6-tunnel/state.json`
 - control socket: `/data/ipv6-tunnel/daemon.sock`
 - shell wrapper: `/data/ipv6-tunnel/tunnel.sh`
-- web UI: `http://<router-ip>:8686/`
+- web UI: `http://<router-ip>:9086/`
 
 ## Что нужно заранее
 
@@ -166,7 +166,7 @@ cat /data/ipv6-tunnel/state.json
 - `state.json` существует;
 - `ctl status` возвращает JSON, а не падает;
 - туннель остаётся выключенным, пока ты явно его не включишь;
-- UI доступен по `http://<router-ip>:8686/`.
+- UI доступен по `http://<router-ip>:9086/`.
 
 ## Когда вносить данные Hurricane Electric
 
@@ -179,7 +179,7 @@ cat /data/ipv6-tunnel/state.json
 Открываешь:
 
 ```text
-http://<router-ip>:8686/
+http://<router-ip>:9086/
 ```
 
 Заполняешь поля так:
@@ -188,7 +188,7 @@ http://<router-ip>:8686/
 - `Local IPv6` -> HE `Client IPv6 Address`
 - `Remote IPv6` -> HE `Server IPv6 Address`
 - `TTL` -> оставляешь `255`, если нет причины менять
-- `MTU` -> оставляешь `1480`, если точно не знаешь, что нужен другой
+- `MTU` -> лучше оставить пустым, тогда daemon сам посчитает его из WAN MTU
 - `WAN Interface` -> обычно `ppp0` на UniFi
 - `Networks` -> твои routed LAN `/64`
 - `DNS` -> нужные тебе IPv6 DNS
@@ -211,7 +211,7 @@ ssh root@192.168.1.1 'cat > /data/ipv6-tunnel/config.json' <<'EOF'
     "local_ipv6": "2001:470:abcd:100::2/64",
     "remote_ipv6": "2001:470:abcd:100::1/64",
     "ttl": 255,
-    "mtu": 1480
+    "mtu": 0
   },
   "lan": {
     "enabled": true,
@@ -232,7 +232,7 @@ ssh root@192.168.1.1 'cat > /data/ipv6-tunnel/config.json' <<'EOF'
     "auto_restart": true
   },
   "server": {
-    "port": 8686,
+    "port": 9086,
     "wan_interface": "ppp0",
     "auth_token": ""
   }
@@ -330,7 +330,7 @@ UI и daemon при этом должны остаться живыми.
 
 - Пустой или неполный конфиг больше не должен мешать запуску daemon и UI.
 - `server.port` в новой модели startup-only.
-- Нормальный путь: оставить `server.port=8686`.
+- Нормальный путь: оставить `server.port=9086`.
 - Если ты руками меняешь `server.port` в `config.json`, для применения нужен restart daemon'а.
 - `ctl` теперь зависит от `/data/ipv6-tunnel/daemon.sock`, значит daemon уже должен быть запущен.
 - `make install` нужен для первой инициализации, `make deploy` для обычных обновлений.
@@ -344,7 +344,7 @@ UI и daemon при этом должны остаться живыми.
 3. `make build`
 4. `make install ...` для первой установки или `make deploy ...` для обновлений
 5. проверить `ctl status`, `ctl health` и `state.json`
-6. проверить UI на `:8686`
+6. проверить UI на `:9086`
 7. внести данные HE
 8. выполнить `ctl up`
 9. проверить `state.json`, `ip tunnel show`, `ip -6 addr` и `ip -6 route`

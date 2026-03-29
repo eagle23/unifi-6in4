@@ -13,7 +13,7 @@ import (
 
 const (
 	InterfaceName string = "sit-6in4"
-	defaultURL    string = "http://127.0.0.1:8686"
+	defaultURL    string = "http://127.0.0.1:9086"
 	unixBaseURL   string = "http://unix"
 
 	ReconcileIdle        = "idle"
@@ -36,6 +36,7 @@ type Status struct {
 	TunnelUp        bool            `json:"tunnel_up"`
 	Interface       string          `json:"interface"`
 	LocalIPv6       string          `json:"local_ipv6"`
+	EffectiveMTU    int             `json:"effective_mtu"`
 	WANIPv4         string          `json:"wan_ipv4"`
 	Networks        []NetworkStatus `json:"networks"`
 	PingOK          bool            `json:"ping_ok"`

@@ -24,9 +24,9 @@
     background: var(--bg);
     color: var(--text);
     min-height: 100vh;
-    padding: 20px;
+    padding: clamp(20px, 4vw, 36px);
   }
-  .container { max-width: 700px; margin: 0 auto; }
+  .container { width: min(1120px, 100%); margin: 0 auto; }
   header {
     display: flex; justify-content: space-between; align-items: center;
     padding: 16px 0; border-bottom: 1px solid var(--border); margin-bottom: 24px;
@@ -38,11 +38,14 @@
   }
   .status-row {
     display: flex; justify-content: space-between; align-items: center;
-    padding: 8px 0; border-bottom: 1px solid var(--border);
+    gap: 20px; padding: 8px 0; border-bottom: 1px solid var(--border);
   }
   .status-row:last-child { border-bottom: none; }
-  .status-label { color: var(--text-dim); font-size: 14px; }
-  .status-value { font-family: monospace; font-size: 14px; }
+  .status-label { color: var(--text-dim); font-size: 14px; flex: 0 0 180px; }
+  .status-value {
+    font-family: monospace; font-size: 14px; text-align: right;
+    flex: 1; min-width: 0; overflow-wrap: anywhere;
+  }
   .badge {
     display: inline-block; padding: 2px 10px; border-radius: 12px;
     font-size: 12px; font-weight: 600;
@@ -85,7 +88,7 @@
   .form-group input:focus, .form-group select:focus {
     outline: none; border-color: var(--accent);
   }
-  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .section-title {
     font-size: 14px; font-weight: 600; color: var(--accent);
     margin-top: 20px; margin-bottom: 8px;
@@ -93,7 +96,7 @@
   }
   .networks-list { margin-top: 8px; }
   .network-entry {
-    display: grid; grid-template-columns: 100px 1fr 80px 40px;
+    display: grid; grid-template-columns: minmax(96px, 120px) minmax(0, 1.7fr) minmax(96px, 0.8fr) 40px;
     gap: 8px; align-items: center; margin-bottom: 8px;
   }
   .network-entry input { font-size: 13px; }
@@ -115,6 +118,19 @@
   }
   .toast-ok { background: var(--green); color: white; }
   .toast-err { background: var(--red); color: white; }
+  @media (max-width: 820px) {
+    .container { width: 100%; }
+    .status-label { flex-basis: 140px; }
+  }
+  @media (max-width: 680px) {
+    body { padding: 16px; }
+    header { gap: 12px; align-items: flex-start; flex-direction: column; }
+    .form-row { grid-template-columns: 1fr; }
+    .network-entry { grid-template-columns: 1fr; }
+    .status-row { align-items: flex-start; }
+    .status-label { flex-basis: auto; }
+    .status-value { text-align: left; }
+  }
 </style>
 </head>
 <body>
@@ -144,6 +160,10 @@
     <div class="status-row">
       <span class="status-label">Local IPv6</span>
       <span class="status-value" id="st-ipv6">-</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Tunnel MTU</span>
+      <span class="status-value" id="st-mtu">-</span>
     </div>
     <div class="status-row">
       <span class="status-label">Ping</span>
@@ -195,8 +215,8 @@
           <input id="cfg-ttl" type="number" value="255">
         </div>
         <div class="form-group">
-          <label>MTU</label>
-          <input id="cfg-mtu" type="number" value="1480">
+          <label>MTU (blank = auto)</label>
+          <input id="cfg-mtu" type="number" min="0" placeholder="Auto from WAN MTU">
         </div>
       </div>
 
@@ -265,7 +285,9 @@
 const API = window.location.origin;
 let authToken = localStorage.getItem('ipv6tunnel_token') || '';
 let currentTunnelEnabled = false;
-let currentServerPort = 8686;
+let currentServerPort = 9086;
+let currentConfiguredMTU = 0;
+let lastStatus = null;
 
 function headers() {
   const h = {'Content-Type': 'application/json'};
@@ -303,6 +325,7 @@ function toast(msg, ok) {
 async function refreshStatus() {
   try {
     const st = await api('GET', '/api/status');
+    lastStatus = st;
     currentTunnelEnabled = !!st.desired_enabled;
     const badge = document.getElementById('st-badge');
     badge.textContent = st.tunnel_up ? 'UP' : 'DOWN';
@@ -311,6 +334,7 @@ async function refreshStatus() {
     document.getElementById('st-iface').textContent = st.interface || '-';
     document.getElementById('st-wan').textContent = st.wan_ipv4 || '-';
     document.getElementById('st-ipv6').textContent = st.local_ipv6 || '-';
+    document.getElementById('st-mtu').textContent = formatEffectiveMTU(st.effective_mtu);
     document.getElementById('st-error').textContent = st.last_error || '-';
     if (st.ping_ok) {
       document.getElementById('st-ping').innerHTML =
@@ -331,6 +355,11 @@ async function refreshStatus() {
   } catch (e) {
     console.error('status:', e);
   }
+}
+
+function formatEffectiveMTU(effectiveMTU) {
+  if (!effectiveMTU) return '-';
+  return currentConfiguredMTU > 0 ? effectiveMTU + ' (manual)' : effectiveMTU + ' (auto)';
 }
 
 async function tunnelAction(action) {
@@ -366,7 +395,8 @@ async function loadConfig() {
     document.getElementById('cfg-local-ipv6').value = cfg.tunnel.local_ipv6 || '';
     document.getElementById('cfg-remote-ipv6').value = cfg.tunnel.remote_ipv6 || '';
     document.getElementById('cfg-ttl').value = cfg.tunnel.ttl || 255;
-    document.getElementById('cfg-mtu').value = cfg.tunnel.mtu || 1480;
+    document.getElementById('cfg-mtu').value = cfg.tunnel.mtu > 0 ? cfg.tunnel.mtu : '';
+    currentConfiguredMTU = cfg.tunnel.mtu || 0;
     document.getElementById('cfg-lan-enabled').checked = cfg.lan.enabled;
     document.getElementById('cfg-dns').value = (cfg.lan.dns || []).join(', ');
     document.getElementById('cfg-mode').value = cfg.lan.mode || 'slaac';
@@ -377,9 +407,12 @@ async function loadConfig() {
     document.getElementById('cfg-health-target').value = cfg.health.target || '';
     document.getElementById('cfg-auto-restart').checked = cfg.health.auto_restart;
     currentTunnelEnabled = !!cfg.tunnel.enabled;
-    currentServerPort = cfg.server.port || 8686;
+    currentServerPort = cfg.server.port || 9086;
     document.getElementById('cfg-wan-iface').value = cfg.server.wan_interface || 'ppp0';
     document.getElementById('cfg-token').value = cfg.server.auth_token || '';
+    if (lastStatus) {
+      document.getElementById('st-mtu').textContent = formatEffectiveMTU(lastStatus.effective_mtu);
+    }
   } catch (e) {
     console.error('load config:', e);
   }
@@ -406,7 +439,7 @@ async function saveConfig(e) {
       local_ipv6: document.getElementById('cfg-local-ipv6').value,
       remote_ipv6: document.getElementById('cfg-remote-ipv6').value,
       ttl: parseInt(document.getElementById('cfg-ttl').value),
-      mtu: parseInt(document.getElementById('cfg-mtu').value)
+      mtu: parseOptionalNumber(document.getElementById('cfg-mtu').value)
     },
     lan: {
       enabled: document.getElementById('cfg-lan-enabled').checked,
@@ -426,6 +459,7 @@ async function saveConfig(e) {
       auth_token: document.getElementById('cfg-token').value
     }
   };
+  currentConfiguredMTU = cfg.tunnel.mtu || 0;
   try {
     await api('PUT', '/api/config', cfg);
     toast('Config saved & reconciled', true);
@@ -437,6 +471,13 @@ async function saveConfig(e) {
   } catch (e) {
     toast('Error: ' + e.message, false);
   }
+}
+
+function parseOptionalNumber(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return 0;
+  const parsed = parseInt(trimmed, 10);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 refreshStatus().then(() => loadConfig());

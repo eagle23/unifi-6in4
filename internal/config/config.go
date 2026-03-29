@@ -11,10 +11,10 @@ import (
 	"github.com/eagle23/unifi-tunnel-4to6/internal/fileutil"
 )
 
-const (
-	defaultTTL            int = 255
-	defaultMTU            int = 1480
-	defaultPort           int = 8686
+	const (
+		defaultTTL            int = 255
+		defaultMTU            int = 0
+	defaultPort           int = 9086
 	defaultWANInterface   string = "ppp0"
 	defaultHealthInterval int = 30
 	defaultHealthTarget   string = "2001:4860:4860::8888"
@@ -192,8 +192,8 @@ func (c *Config) ValidationReasons() []string {
 	if c.Tunnel.TTL <= 0 {
 		reasons = append(reasons, "tunnel.ttl must be greater than zero")
 	}
-	if c.Tunnel.MTU <= 0 {
-		reasons = append(reasons, "tunnel.mtu must be greater than zero")
+	if c.Tunnel.MTU < 0 {
+		reasons = append(reasons, "tunnel.mtu must be zero (auto) or greater than zero")
 	}
 	if c.Health.Enabled {
 		if c.Health.IntervalSec <= 0 {
@@ -329,4 +329,3 @@ func isValidIPv6Prefix(value string) bool {
 	}
 	return prefix.Addr().Is6()
 }
-

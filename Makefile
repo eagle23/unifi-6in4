@@ -15,10 +15,9 @@ test:
 
 deploy: build
 	ssh $(ROUTER_USER)@$(ROUTER_HOST) "mkdir -p $(REMOTE_DIR)"
-	scp bin/$(BINARY_NAME) $(ROUTER_USER)@$(ROUTER_HOST):$(REMOTE_DIR)/
-	scp scripts/tunnel.sh $(ROUTER_USER)@$(ROUTER_HOST):$(REMOTE_DIR)/
-	ssh $(ROUTER_USER)@$(ROUTER_HOST) "chmod +x $(REMOTE_DIR)/$(BINARY_NAME) $(REMOTE_DIR)/tunnel.sh"
-	ssh $(ROUTER_USER)@$(ROUTER_HOST) "pkill -f $(BINARY_NAME) || true; $(REMOTE_DIR)/$(BINARY_NAME) &"
+	scp bin/$(BINARY_NAME) $(ROUTER_USER)@$(ROUTER_HOST):/tmp/$(BINARY_NAME).new
+	scp scripts/tunnel.sh $(ROUTER_USER)@$(ROUTER_HOST):/tmp/tunnel.sh.new
+	ssh $(ROUTER_USER)@$(ROUTER_HOST) "pkill -f '^$(REMOTE_DIR)/$(BINARY_NAME)($$| )' || true; sleep 1; mv /tmp/$(BINARY_NAME).new $(REMOTE_DIR)/$(BINARY_NAME); mv /tmp/tunnel.sh.new $(REMOTE_DIR)/tunnel.sh; chmod +x $(REMOTE_DIR)/$(BINARY_NAME) $(REMOTE_DIR)/tunnel.sh; $(REMOTE_DIR)/tunnel.sh boot"
 
 install: build
 	scp scripts/install.sh $(ROUTER_USER)@$(ROUTER_HOST):/tmp/

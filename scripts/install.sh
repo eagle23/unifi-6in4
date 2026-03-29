@@ -35,7 +35,7 @@ if [ ! -f "${INSTALL_DIR}/config.json" ]; then
     "local_ipv6": "",
     "remote_ipv6": "",
     "ttl": 255,
-    "mtu": 1480
+    "mtu": 0
   },
   "lan": {
     "enabled": false,
@@ -50,7 +50,7 @@ if [ ! -f "${INSTALL_DIR}/config.json" ]; then
     "auto_restart": true
   },
   "server": {
-    "port": 8686,
+    "port": 9086,
     "wan_interface": "ppp0",
     "auth_token": ""
   }
@@ -81,7 +81,7 @@ log_message "starting server"
 nohup "${INSTALL_DIR}/ipv6-tunnel-server" >/dev/null 2>&1 </dev/null &
 
 log_message "installation complete"
-UI_PORT=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/config.json')).get('server',{}).get('port',8686))" 2>/dev/null || echo 8686)
+UI_PORT=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/config.json')).get('server',{}).get('port',9086))" 2>/dev/null || echo 9086)
 log_message "access UI at http://$(hostname -I | awk '{print $1}'):${UI_PORT}/"
 
 rm -f /tmp/ipv6-tunnel-server /tmp/tunnel.sh /tmp/rc-local-fragment.sh
