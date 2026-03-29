@@ -16,6 +16,7 @@ import (
 const (
 	iptablesChainInput   = "IPV6TUNNEL_INPUT"
 	iptablesChainForward = "IPV6TUNNEL_FORWARD"
+	iptablesChainMSS     = "IPV6TUNNEL_MSS"
 )
 
 var (
@@ -141,6 +142,11 @@ func (b *SystemBackend) Reconcile(input ReconcileInput) error {
 	b.runBestEffort("ip6tables", "-A", iptablesChainForward, "-o", tunnel.InterfaceName, "-j", "ACCEPT")
 	b.runBestEffort("ip6tables", "-A", iptablesChainForward, "-i", tunnel.InterfaceName, "-m", "state", "--state", "NEW", "-j", "DROP")
 	b.ensureJump("ip6tables", "FORWARD", iptablesChainForward)
+	// TCP MSS clamping — prevents broken sites due to PMTUD failures
+	b.runBestEffort("ip6tables", "-t", "mangle", "-N", iptablesChainMSS)
+	b.runBestEffort("ip6tables", "-t", "mangle", "-F", iptablesChainMSS)
+	b.runBestEffort("ip6tables", "-t", "mangle", "-A", iptablesChainMSS, "-o", tunnel.InterfaceName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu")
+	b.ensureJumpTable("ip6tables", "mangle", "FORWARD", iptablesChainMSS)
 	return nil
 }
 
@@ -184,6 +190,9 @@ func (b *SystemBackend) teardown(applied AppliedState) {
 	b.removeJump("ip6tables", "FORWARD", iptablesChainForward)
 	b.runBestEffort("ip6tables", "-F", iptablesChainForward)
 	b.runBestEffort("ip6tables", "-X", iptablesChainForward)
+	b.removeJumpTable("ip6tables", "mangle", "FORWARD", iptablesChainMSS)
+	b.runBestEffort("ip6tables", "-t", "mangle", "-F", iptablesChainMSS)
+	b.runBestEffort("ip6tables", "-t", "mangle", "-X", iptablesChainMSS)
 	for _, network := range applied.Networks {
 		gatewayAddress, err := gatewayForPrefix(network.Prefix)
 		if err != nil {
@@ -232,6 +241,16 @@ func (b *SystemBackend) ensureJump(binary string, parentChain string, targetChai
 // removeJump removes a -j jump rule from parentChain.
 func (b *SystemBackend) removeJump(binary string, parentChain string, targetChain string) {
 	b.runBestEffort(binary, "-D", parentChain, "-j", targetChain)
+}
+
+func (b *SystemBackend) ensureJumpTable(binary string, table string, parentChain string, targetChain string) {
+	if _, err := b.runner.CombinedOutput(binary, "-t", table, "-C", parentChain, "-j", targetChain); err != nil {
+		b.runBestEffort(binary, "-t", table, "-I", parentChain, "-j", targetChain)
+	}
+}
+
+func (b *SystemBackend) removeJumpTable(binary string, table string, parentChain string, targetChain string) {
+	b.runBestEffort(binary, "-t", table, "-D", parentChain, "-j", targetChain)
 }
 
 func gatewayForPrefix(prefixValue string) (string, error) {
