@@ -14,9 +14,12 @@ log_message "installing ipv6-tunnel to ${INSTALL_DIR}"
 
 mkdir -p "${INSTALL_DIR}"
 
-cp /tmp/ipv6-tunnel-server "${INSTALL_DIR}/"
-cp /tmp/tunnel.sh "${INSTALL_DIR}/"
-cp /tmp/rc-local-fragment.sh "${INSTALL_DIR}/"
+pkill -f "^${INSTALL_DIR}/ipv6-tunnel-server($| )" 2>/dev/null || true
+sleep 1
+
+mv /tmp/ipv6-tunnel-server "${INSTALL_DIR}/ipv6-tunnel-server"
+mv /tmp/tunnel.sh "${INSTALL_DIR}/tunnel.sh"
+mv /tmp/rc-local-fragment.sh "${INSTALL_DIR}/rc-local-fragment.sh"
 
 chmod +x "${INSTALL_DIR}/ipv6-tunnel-server"
 chmod +x "${INSTALL_DIR}/tunnel.sh"
@@ -74,13 +77,11 @@ else
     log_message "boot entry already present in ${RC_LOCAL}"
 fi
 
-pkill -f ipv6-tunnel-server 2>/dev/null || true
-sleep 1
-
 log_message "starting server"
-"${INSTALL_DIR}/ipv6-tunnel-server" &
+nohup "${INSTALL_DIR}/ipv6-tunnel-server" >/dev/null 2>&1 </dev/null &
 
 log_message "installation complete"
-log_message "access UI at http://$(hostname -I | awk '{print $1}'):8686/"
+UI_PORT=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/config.json')).get('server',{}).get('port',8686))" 2>/dev/null || echo 8686)
+log_message "access UI at http://$(hostname -I | awk '{print $1}'):${UI_PORT}/"
 
 rm -f /tmp/ipv6-tunnel-server /tmp/tunnel.sh /tmp/rc-local-fragment.sh

@@ -325,9 +325,10 @@ func (s *Service) startAdvertiserLocked(cfg *config.Config) error {
 		dnsServers = append(dnsServers, dnsServer)
 	}
 	advertiser, err := ra.NewAdvertiser(ra.AdvertiserConfig{
-		Networks: networks,
-		DNS:      dnsServers,
-		Interval: 10 * time.Second,
+		Networks:  networks,
+		DNS:       dnsServers,
+		Interval:  10 * time.Second,
+		TunnelMTU: cfg.Tunnel.MTU,
 	})
 	if err != nil {
 		return err
