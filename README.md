@@ -4,6 +4,10 @@
 
 `unifi-tunnel-4to6` is a small on-router daemon for running an IPv6 `6in4` tunnel on UniFi hardware such as UCG Fiber.
 
+## UI Screenshot
+
+![IPv6 Tunnel Manager web UI](docs/images/ui-screenshot.png)
+
 It is built for the case where:
 
 - your ISP gives you only IPv4 on WAN;
