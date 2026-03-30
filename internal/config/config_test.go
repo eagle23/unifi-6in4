@@ -94,4 +94,7 @@ func TestDefaults(t *testing.T) {
 	if cfg.LAN.Mode != "slaac" {
 		t.Errorf("Mode = %q, want %q", cfg.LAN.Mode, "slaac")
 	}
+	if len(cfg.LAN.DNS) != 0 {
+		t.Errorf("len(DNS) = %d, want 0", len(cfg.LAN.DNS))
+	}
 }

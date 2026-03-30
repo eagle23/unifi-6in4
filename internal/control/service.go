@@ -336,13 +336,9 @@ func (s *Service) startAdvertiserLocked(cfg *config.Config) error {
 			Prefix:    prefix,
 		})
 	}
-	dnsServers := make([]netip.Addr, 0, len(cfg.LAN.DNS))
-	for _, dnsValue := range cfg.LAN.DNS {
-		dnsServer, err := netip.ParseAddr(dnsValue)
-		if err != nil {
-			return fmt.Errorf("parse RA dns %q: %w", dnsValue, err)
-		}
-		dnsServers = append(dnsServers, dnsServer)
+	dnsServers, err := resolveRADNSServers(cfg)
+	if err != nil {
+		return err
 	}
 	advertiser, err := ra.NewAdvertiser(ra.AdvertiserConfig{
 		Networks:  networks,
@@ -355,6 +351,40 @@ func (s *Service) startAdvertiserLocked(cfg *config.Config) error {
 	}
 	s.advertiser = advertiser
 	return nil
+}
+
+func resolveRADNSServers(cfg *config.Config) ([]netip.Addr, error) {
+	if len(cfg.LAN.DNS) > 0 {
+		dnsServers := make([]netip.Addr, 0, len(cfg.LAN.DNS))
+		for _, dnsValue := range cfg.LAN.DNS {
+			dnsServer, err := netip.ParseAddr(dnsValue)
+			if err != nil {
+				return nil, fmt.Errorf("parse RA dns %q: %w", dnsValue, err)
+			}
+			dnsServers = append(dnsServers, dnsServer)
+		}
+		return dnsServers, nil
+	}
+	return deriveRouterDNSServers(cfg.LAN.Networks)
+}
+
+func deriveRouterDNSServers(networks []config.NetworkConfig) ([]netip.Addr, error) {
+	dnsServers := make([]netip.Addr, 0, len(networks))
+	seen := make(map[string]struct{}, len(networks))
+	for _, network := range networks {
+		prefix, err := netip.ParsePrefix(network.Prefix)
+		if err != nil {
+			return nil, fmt.Errorf("parse auto RA dns prefix %q: %w", network.Prefix, err)
+		}
+		routerAddress := prefix.Masked().Addr().Next()
+		key := routerAddress.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		dnsServers = append(dnsServers, routerAddress)
+	}
+	return dnsServers, nil
 }
 
 func (s *Service) stopAdvertiserLocked() {

@@ -68,6 +68,7 @@ Daemon стартует в режиме `serve` и делает три вещи:
 - default IPv6 route через `sit-6in4`;
 - `prefix::1/64` на LAN bridge-интерфейсе;
 - Router Advertisement для SLAAC;
+- если `lan.dns` пустой, через RA рекламируется LAN IPv6 самого роутера, например `prefix::1`;
 - TCP MSS clamp для IPv6 TCP.
 
 ### Поведение MTU
@@ -195,7 +196,7 @@ make deploy ROUTER_HOST=192.168.1.1 ROUTER_USER=root
   },
   "lan": {
     "enabled": true,
-    "dns": ["2606:4700:4700::1111", "2001:4860:4860::8888"],
+    "dns": [],
     "mode": "slaac",
     "networks": [
       {
@@ -218,6 +219,12 @@ make deploy ROUTER_HOST=192.168.1.1 ROUTER_USER=root
   }
 }
 ```
+
+Пустой `lan.dns` теперь означает:
+
+- auto-режим;
+- через RA рекламируется IPv6 адрес самого роутера, вычисленный из каждого LAN prefix;
+- для `2001:470:28:1038::/64` клиентам уйдёт `2001:470:28:1038::1` как DNS.
 
 Дальше можно:
 

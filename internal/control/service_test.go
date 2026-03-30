@@ -2,6 +2,7 @@ package control
 
 import (
 	"errors"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -195,4 +196,42 @@ func mustStatusState(t *testing.T, service *Service) string {
 		t.Fatalf("Status() error: %v", err)
 	}
 	return status.ReconcileState
+}
+
+func TestResolveRADNSServersUsesConfiguredValues(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.LAN.DNS = []string{"2001:4860:4860::8888"}
+	actualDNS, err := resolveRADNSServers(cfg)
+	if err != nil {
+		t.Fatalf("resolveRADNSServers() error: %v", err)
+	}
+	expectedDNS := netip.MustParseAddr("2001:4860:4860::8888")
+	if len(actualDNS) != 1 || actualDNS[0] != expectedDNS {
+		t.Fatalf("actualDNS = %v, want [%s]", actualDNS, expectedDNS)
+	}
+}
+
+func TestResolveRADNSServersFallsBackToRouterGatewayAddresses(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.LAN.Networks = []config.NetworkConfig{
+		{Interface: "br0", Prefix: "2001:470:28:1038::/64"},
+		{Interface: "br10", Prefix: "2001:470:28:1038::/64"},
+		{Interface: "br20", Prefix: "2001:470:28:1039::/64"},
+	}
+	actualDNS, err := resolveRADNSServers(cfg)
+	if err != nil {
+		t.Fatalf("resolveRADNSServers() error: %v", err)
+	}
+	expectedDNS := []netip.Addr{
+		netip.MustParseAddr("2001:470:28:1038::1"),
+		netip.MustParseAddr("2001:470:28:1039::1"),
+	}
+	if len(actualDNS) != len(expectedDNS) {
+		t.Fatalf("len(actualDNS) = %d, want %d", len(actualDNS), len(expectedDNS))
+	}
+	for index := range expectedDNS {
+		if actualDNS[index] != expectedDNS[index] {
+			t.Fatalf("actualDNS[%d] = %s, want %s", index, actualDNS[index], expectedDNS[index])
+		}
+	}
 }

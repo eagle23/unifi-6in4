@@ -11,17 +11,15 @@ import (
 	"github.com/eagle23/unifi-tunnel-4to6/internal/fileutil"
 )
 
-	const (
-		defaultTTL            int = 255
-		defaultMTU            int = 0
-	defaultPort           int = 9086
+const (
+	defaultTTL            int    = 255
+	defaultMTU            int    = 0
+	defaultPort           int    = 9086
 	defaultWANInterface   string = "ppp0"
-	defaultHealthInterval int = 30
+	defaultHealthInterval int    = 30
 	defaultHealthTarget   string = "2001:4860:4860::8888"
 	defaultLANMode        string = "slaac"
 )
-
-var defaultDNSServers = []string{"2606:4700:4700::1111", "2001:4860:4860::8888"}
 
 type rawTunnelConfig struct {
 	Enabled        *bool  `json:"enabled"`
@@ -258,7 +256,7 @@ func Defaults() *Config {
 		},
 		LAN: LANConfig{
 			Enabled: false,
-			DNS:     append([]string(nil), defaultDNSServers...),
+			DNS:     []string{},
 			Mode:    defaultLANMode,
 		},
 		Health: HealthConfig{
@@ -280,9 +278,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Tunnel.MTU == 0 {
 		c.Tunnel.MTU = defaultMTU
-	}
-	if len(c.LAN.DNS) == 0 {
-		c.LAN.DNS = append([]string(nil), defaultDNSServers...)
 	}
 	if strings.TrimSpace(c.LAN.Mode) == "" {
 		c.LAN.Mode = defaultLANMode

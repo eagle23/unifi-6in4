@@ -227,8 +227,8 @@
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label>DNS Servers</label>
-          <input id="cfg-dns" placeholder="2606:4700:4700::1111, 2001:4860:4860::8888">
+          <label>DNS Servers (blank = router LAN IPv6)</label>
+          <input id="cfg-dns" placeholder="Auto: prefix::1">
         </div>
         <div class="form-group">
           <label>Mode</label>
@@ -288,6 +288,9 @@ let currentTunnelEnabled = false;
 let currentServerPort = 9086;
 let currentConfiguredMTU = 0;
 let lastStatus = null;
+let currentAutoDNSValues = [];
+let isUsingAutoDNS = false;
+let isDNSManuallyEdited = false;
 
 function headers() {
   const h = {'Content-Type': 'application/json'};
@@ -383,8 +386,55 @@ function addNetwork(iface, prefix, comment) {
     '<input placeholder="br0" value="' + esc(iface||'') + '">' +
     '<input placeholder="2001:470:xxxx:1::/64" value="' + esc(prefix||'') + '">' +
     '<input placeholder="Name" value="' + esc(comment||'') + '">' +
-    '<span class="btn-del" onclick="this.parentElement.remove()">x</span>';
+    '<span class="btn-del" onclick="this.parentElement.remove(); refreshAutoDNSField();">x</span>';
   list.appendChild(row);
+  row.querySelectorAll('input').forEach(input => input.addEventListener('input', refreshAutoDNSField));
+  refreshAutoDNSField();
+}
+
+function parseConfiguredDNS(value) {
+  return value.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function prefixToRouterAddress(prefix) {
+  const address = String(prefix || '').split('/')[0].trim();
+  if (!address) return '';
+  if (address.endsWith('::')) return address + '1';
+  if (address.endsWith(':')) return address + '1';
+  return address + '::1';
+}
+
+function deriveAutoDNSValues(networks) {
+  const values = [];
+  const seen = new Set();
+  networks.forEach(network => {
+    const address = prefixToRouterAddress(network.prefix);
+    if (!address || seen.has(address)) return;
+    seen.add(address);
+    values.push(address);
+  });
+  return values;
+}
+
+function collectNetworks() {
+  const networks = [];
+  document.querySelectorAll('.network-entry').forEach(row => {
+    const inputs = row.querySelectorAll('input');
+    if (inputs[0].value) {
+      networks.push({
+        interface: inputs[0].value,
+        prefix: inputs[1].value,
+        comment: inputs[2].value
+      });
+    }
+  });
+  return networks;
+}
+
+function refreshAutoDNSField() {
+  if (!isUsingAutoDNS || isDNSManuallyEdited) return;
+  currentAutoDNSValues = deriveAutoDNSValues(collectNetworks());
+  document.getElementById('cfg-dns').value = currentAutoDNSValues.join(', ');
 }
 
 async function loadConfig() {
@@ -398,10 +448,13 @@ async function loadConfig() {
     document.getElementById('cfg-mtu').value = cfg.tunnel.mtu > 0 ? cfg.tunnel.mtu : '';
     currentConfiguredMTU = cfg.tunnel.mtu || 0;
     document.getElementById('cfg-lan-enabled').checked = cfg.lan.enabled;
-    document.getElementById('cfg-dns').value = (cfg.lan.dns || []).join(', ');
     document.getElementById('cfg-mode').value = cfg.lan.mode || 'slaac';
     document.getElementById('networks-list').innerHTML = '';
     (cfg.lan.networks || []).forEach(n => addNetwork(n.interface, n.prefix, n.comment));
+    currentAutoDNSValues = deriveAutoDNSValues(cfg.lan.networks || []);
+    isUsingAutoDNS = !cfg.lan.dns || cfg.lan.dns.length === 0;
+    isDNSManuallyEdited = false;
+    document.getElementById('cfg-dns').value = isUsingAutoDNS ? currentAutoDNSValues.join(', ') : (cfg.lan.dns || []).join(', ');
     document.getElementById('cfg-health-enabled').checked = cfg.health.enabled;
     document.getElementById('cfg-health-interval').value = cfg.health.interval_sec || 30;
     document.getElementById('cfg-health-target').value = cfg.health.target || '';
@@ -420,17 +473,10 @@ async function loadConfig() {
 
 async function saveConfig(e) {
   e.preventDefault();
-  const networks = [];
-  document.querySelectorAll('.network-entry').forEach(row => {
-    const inputs = row.querySelectorAll('input');
-    if (inputs[0].value) {
-      networks.push({
-        interface: inputs[0].value,
-        prefix: inputs[1].value,
-        comment: inputs[2].value
-      });
-    }
-  });
+  const networks = collectNetworks();
+  const dnsValue = isUsingAutoDNS && !isDNSManuallyEdited
+    ? []
+    : parseConfiguredDNS(document.getElementById('cfg-dns').value);
   const cfg = {
     tunnel: {
       enabled: currentTunnelEnabled,
@@ -443,7 +489,7 @@ async function saveConfig(e) {
     },
     lan: {
       enabled: document.getElementById('cfg-lan-enabled').checked,
-      dns: document.getElementById('cfg-dns').value.split(',').map(s => s.trim()).filter(Boolean),
+      dns: dnsValue,
       mode: document.getElementById('cfg-mode').value,
       networks: networks
     },
@@ -479,6 +525,11 @@ function parseOptionalNumber(value) {
   const parsed = parseInt(trimmed, 10);
   return Number.isFinite(parsed) ? parsed : 0;
 }
+
+document.getElementById('cfg-dns').addEventListener('input', () => {
+  isDNSManuallyEdited = true;
+  isUsingAutoDNS = false;
+});
 
 refreshStatus().then(() => loadConfig());
 setInterval(refreshStatus, 5000);

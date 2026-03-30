@@ -68,6 +68,7 @@ On a healthy config the daemon ensures:
 - default IPv6 route points to `sit-6in4`;
 - LAN bridge interfaces get `prefix::1/64`;
 - RA is sent for SLAAC;
+- if `lan.dns` is empty, RA advertises the router LAN IPv6 address such as `prefix::1` as RDNSS;
 - TCP MSS is clamped on forwarded IPv6 TCP traffic.
 
 ### MTU behavior
@@ -191,7 +192,7 @@ Your public WAN IPv4 is not entered manually. The daemon reads it from the confi
   },
   "lan": {
     "enabled": true,
-    "dns": ["2606:4700:4700::1111", "2001:4860:4860::8888"],
+    "dns": [],
     "mode": "slaac",
     "networks": [
       {
@@ -214,6 +215,12 @@ Your public WAN IPv4 is not entered manually. The daemon reads it from the confi
   }
 }
 ```
+
+An empty `lan.dns` means:
+
+- auto mode;
+- advertise the router LAN IPv6 address derived from each configured prefix;
+- for `2001:470:28:1038::/64`, clients receive `2001:470:28:1038::1` as DNS.
 
 Then either:
 

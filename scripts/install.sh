@@ -39,7 +39,7 @@ if [ ! -f "${INSTALL_DIR}/config.json" ]; then
   },
   "lan": {
     "enabled": false,
-    "dns": ["2606:4700:4700::1111", "2001:4860:4860::8888"],
+    "dns": [],
     "mode": "slaac",
     "networks": []
   },
