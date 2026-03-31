@@ -24,6 +24,7 @@ var (
 	ipv4AddressPattern  = regexp.MustCompile(`inet (\d+\.\d+\.\d+\.\d+)`)
 	interfaceMTUPattern = regexp.MustCompile(`mtu (\d+)`)
 	pingTimePattern     = regexp.MustCompile(`time=([0-9.]+)`)
+	ipv6RouteSrcPattern = regexp.MustCompile(`\bsrc ([0-9a-fA-F:]+)\b`)
 )
 
 var sleepFn = time.Sleep
@@ -122,9 +123,6 @@ func (b *SystemBackend) Reconcile(input ReconcileInput) error {
 	if err := b.run("ip", "-6", "addr", "add", input.Config.Tunnel.LocalIPv6, "dev", tunnel.InterfaceName); err != nil {
 		return err
 	}
-	if err := b.run("ip", "-6", "route", "replace", "::/0", "dev", tunnel.InterfaceName); err != nil {
-		return err
-	}
 	if err := b.run("sysctl", "-w", "net.ipv6.conf.all.forwarding=1"); err != nil {
 		return err
 	}
@@ -145,6 +143,13 @@ func (b *SystemBackend) Reconcile(input ReconcileInput) error {
 				return err
 			}
 		}
+	}
+	defaultRouteArgs, err := buildDefaultRouteArgs(input.Config)
+	if err != nil {
+		return err
+	}
+	if err := b.run("ip", defaultRouteArgs...); err != nil {
+		return err
 	}
 	// IPv4: allow protocol 41 (6in4) on WAN
 	b.runBestEffort("iptables", "-N", iptablesChainInput)
@@ -223,7 +228,16 @@ func (b *SystemBackend) Observe(input ObserveInput) (*Observation, error) {
 
 // Probe runs a single IPv6 ping probe.
 func (b *SystemBackend) Probe(target string) (ProbeResult, error) {
-	output, err := b.runner.CombinedOutput("ping", "-6", "-c", "1", "-W", "3", target)
+	args := []string{"-6", "-n", "-c", "1", "-W", "3"}
+	sourceAddress, err := b.resolveProbeSourceAddress(target)
+	if err != nil {
+		return ProbeResult{}, err
+	}
+	if sourceAddress != "" {
+		args = append(args, "-I", sourceAddress)
+	}
+	args = append(args, target)
+	output, err := b.runner.CombinedOutput("ping", args...)
 	if err != nil {
 		return ProbeResult{PingOK: false, PingMs: 0}, nil
 	}
@@ -335,4 +349,74 @@ func gatewayForPrefix(prefixValue string) (string, error) {
 	}
 	gateway := prefix.Masked().Addr().Next()
 	return gateway.String() + "/" + strconv.Itoa(prefix.Bits()), nil
+}
+
+func buildDefaultRouteArgs(cfg *config.Config) ([]string, error) {
+	routeArgs := []string{"-6", "route", "replace", "::/0", "dev", tunnel.InterfaceName}
+	sourceAddress, err := selectDefaultRouteSource(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if sourceAddress == "" {
+		return routeArgs, nil
+	}
+	return append(routeArgs, "src", sourceAddress), nil
+}
+
+func selectDefaultRouteSource(cfg *config.Config) (string, error) {
+	if cfg == nil {
+		return "", nil
+	}
+	for _, network := range cfg.LAN.Networks {
+		gatewayPrefix, err := gatewayForPrefix(network.Prefix)
+		if err != nil {
+			return "", err
+		}
+		gatewayAddress, err := addressFromPrefix(gatewayPrefix)
+		if err != nil {
+			return "", err
+		}
+		if isPreferredIPv6SourceAddress(gatewayAddress) {
+			return gatewayAddress.String(), nil
+		}
+	}
+	tunnelAddress, err := addressFromPrefix(cfg.Tunnel.LocalIPv6)
+	if err != nil {
+		return "", err
+	}
+	if isPreferredIPv6SourceAddress(tunnelAddress) {
+		return tunnelAddress.String(), nil
+	}
+	return "", nil
+}
+
+func addressFromPrefix(prefixValue string) (netip.Addr, error) {
+	prefix, err := netip.ParsePrefix(prefixValue)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("parse IPv6 prefix: %w", err)
+	}
+	return prefix.Addr(), nil
+}
+
+func isPreferredIPv6SourceAddress(address netip.Addr) bool {
+	return address.Is6() && address.IsGlobalUnicast() && !address.IsPrivate()
+}
+
+func (b *SystemBackend) resolveProbeSourceAddress(target string) (string, error) {
+	output, err := b.runner.CombinedOutput("ip", "-6", "route", "get", target)
+	if err != nil {
+		return "", nil
+	}
+	match := ipv6RouteSrcPattern.FindStringSubmatch(string(output))
+	if len(match) < 2 {
+		return "", nil
+	}
+	address, err := netip.ParseAddr(match[1])
+	if err != nil {
+		return "", nil
+	}
+	if !isPreferredIPv6SourceAddress(address) {
+		return "", nil
+	}
+	return address.String(), nil
 }
