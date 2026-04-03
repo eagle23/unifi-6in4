@@ -261,6 +261,80 @@ func TestServiceUpdateConfigDocumentRejectsInvalidActiveSwitchAtomically(t *test
 	}
 }
 
+func TestServiceUpdateConfigDocumentKeepsCurrentProfileWhenReconcileFails(t *testing.T) {
+	dir := t.TempDir()
+	configPath := dir + "/config.json"
+	statePath := dir + "/state.json"
+	document := config.DefaultDocument()
+	document.StorageFormat = config.StorageFormatProfiles
+	document.TunnelEnabled = true
+	document.ActiveProfileID = "primary"
+	document.Profiles = []config.Profile{
+		{
+			ID:   "primary",
+			Name: "Primary",
+			Config: config.ProfileConfig{
+				Tunnel: config.TunnelConfig{
+					Broker:         "he",
+					RemoteEndpoint: "216.66.88.98",
+					LocalIPv6:      "2001:470::2/64",
+					RemoteIPv6:     "2001:470::1/64",
+					TTL:            255,
+					MTU:            0,
+				},
+				LAN:    config.LANConfig{Enabled: false, DNS: []string{}, Mode: "slaac", Networks: []config.NetworkConfig{}},
+				Health: config.HealthConfig{Enabled: true, IntervalSec: 30, Target: "2001:4860:4860::8888", AutoRestart: true},
+			},
+		},
+		{
+			ID:   "backup",
+			Name: "Backup",
+			Config: config.ProfileConfig{
+				Tunnel: config.TunnelConfig{
+					Broker:         "custom",
+					RemoteEndpoint: "198.51.100.10",
+					LocalIPv6:      "2001:db8::2/64",
+					RemoteIPv6:     "2001:db8::1/64",
+					TTL:            255,
+					MTU:            0,
+				},
+				LAN:    config.LANConfig{Enabled: false, DNS: []string{}, Mode: "slaac", Networks: []config.NetworkConfig{}},
+				Health: config.HealthConfig{Enabled: true, IntervalSec: 30, Target: "2001:4860:4860::8888", AutoRestart: true},
+			},
+		},
+	}
+	if err := config.SaveDocument(configPath, document); err != nil {
+		t.Fatalf("SaveDocument() error: %v", err)
+	}
+	backend := &fakeBackend{reconcileErr: errors.New("backend boom")}
+	service, err := NewService(ServiceParams{
+		ConfigPath: configPath,
+		StatePath:  statePath,
+		Backend:    backend,
+	})
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	defer service.Stop()
+	nextDocument := document.Clone()
+	nextDocument.ActiveProfileID = "backup"
+	err = service.UpdateConfigDocument(nextDocument)
+	if err == nil {
+		t.Fatal("UpdateConfigDocument() error = nil, want backend error")
+	}
+	currentDocument := service.GetConfigDocument()
+	if currentDocument.ActiveProfileID != "primary" {
+		t.Errorf("ActiveProfileID = %q, want %q", currentDocument.ActiveProfileID, "primary")
+	}
+	persistedDocument, loadErr := config.LoadDocument(configPath)
+	if loadErr != nil {
+		t.Fatalf("LoadDocument() error: %v", loadErr)
+	}
+	if persistedDocument.ActiveProfileID != "primary" {
+		t.Errorf("persisted ActiveProfileID = %q, want %q", persistedDocument.ActiveProfileID, "primary")
+	}
+}
+
 func TestServiceRetriesFailedInitialReconcileInBackground(t *testing.T) {
 	dir := t.TempDir()
 	configPath := dir + "/config.json"

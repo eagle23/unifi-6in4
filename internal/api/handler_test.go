@@ -254,6 +254,101 @@ func TestHandleUpdateConfigAcceptsDocument(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateConfigWithLegacyPayloadPreservesExistingProfiles(t *testing.T) {
+	currentDocument := config.DefaultDocument()
+	currentDocument.StorageFormat = config.StorageFormatProfiles
+	currentDocument.TunnelEnabled = true
+	currentDocument.ActiveProfileID = "primary"
+	currentDocument.Server.Port = 9876
+	currentDocument.Profiles = []config.Profile{
+		{
+			ID:   "primary",
+			Name: "Primary",
+			Config: config.ProfileConfig{
+				Tunnel: config.TunnelConfig{
+					Broker:         "he",
+					RemoteEndpoint: "216.66.88.98",
+					LocalIPv6:      "2001:470::2/64",
+					RemoteIPv6:     "2001:470::1/64",
+					TTL:            255,
+					MTU:            1480,
+				},
+				LAN:    config.LANConfig{Enabled: false, DNS: []string{}, Mode: "slaac", Networks: []config.NetworkConfig{}},
+				Health: config.HealthConfig{Enabled: true, IntervalSec: 30, Target: "2001:4860:4860::8888", AutoRestart: true},
+			},
+		},
+		{
+			ID:   "backup",
+			Name: "Backup",
+			Config: config.ProfileConfig{
+				Tunnel: config.TunnelConfig{
+					Broker:         "custom",
+					RemoteEndpoint: "198.51.100.10",
+					LocalIPv6:      "2001:db8::2/64",
+					RemoteIPv6:     "2001:db8::1/64",
+					TTL:            255,
+					MTU:            0,
+				},
+				LAN:    config.LANConfig{Enabled: false, DNS: []string{}, Mode: "slaac", Networks: []config.NetworkConfig{}},
+				Health: config.HealthConfig{Enabled: true, IntervalSec: 30, Target: "2001:4860:4860::8888", AutoRestart: true},
+			},
+		},
+	}
+	controller := &mockController{document: currentDocument, status: &tunnel.Status{}}
+	handler := api.NewHandler(controller)
+	body := []byte(`{
+		"tunnel": {
+			"enabled": true,
+			"broker": "ip4market",
+			"remote_endpoint": "203.0.113.5",
+			"local_ipv6": "2001:db8:ffff::2/64",
+			"remote_ipv6": "2001:db8:ffff::1/64",
+			"ttl": 64,
+			"mtu": 1472
+		},
+		"lan": {
+			"enabled": false,
+			"dns": [],
+			"mode": "slaac",
+			"networks": []
+		},
+		"health": {
+			"enabled": true,
+			"interval_sec": 45,
+			"target": "2001:4860:4860::8888",
+			"auto_restart": false
+		},
+		"server": {
+			"wan_interface": "ppp0",
+			"auth_token": "new-token"
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.HandleUpdateConfig(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if controller.updatedDocument == nil {
+		t.Fatal("updatedDocument = nil")
+	}
+	if controller.updatedDocument.StorageFormat != config.StorageFormatProfiles {
+		t.Fatalf("StorageFormat = %q, want %q", controller.updatedDocument.StorageFormat, config.StorageFormatProfiles)
+	}
+	if len(controller.updatedDocument.Profiles) != 2 {
+		t.Fatalf("len(Profiles) = %d, want 2", len(controller.updatedDocument.Profiles))
+	}
+	if controller.updatedDocument.ActiveProfileID != "primary" {
+		t.Fatalf("ActiveProfileID = %q, want %q", controller.updatedDocument.ActiveProfileID, "primary")
+	}
+	if controller.updatedDocument.Server.Port != 9876 {
+		t.Fatalf("Server.Port = %d, want 9876", controller.updatedDocument.Server.Port)
+	}
+	if controller.updatedDocument.Profiles[1].ID != "backup" {
+		t.Fatalf("Profiles[1].ID = %q, want backup", controller.updatedDocument.Profiles[1].ID)
+	}
+}
+
 func TestHandleUpdateConfigValidationError(t *testing.T) {
 	controller := &mockController{
 		document:  config.DefaultDocument(),

@@ -223,6 +223,118 @@ func TestDocumentValidateAllowsInvalidInactiveDraftProfiles(t *testing.T) {
 	}
 }
 
+func TestParseDocumentRejectsExplicitEmptyProfilesList(t *testing.T) {
+	data := []byte(`{
+		"tunnel_enabled": false,
+		"active_profile_id": "missing",
+		"profiles": [],
+		"server": {"port": 9086, "wan_interface": "ppp0", "auth_token": ""}
+	}`)
+	_, err := config.ParseDocument(data)
+	if err == nil {
+		t.Fatal("ParseDocument() error = nil, want validation error")
+	}
+	validationErr, ok := err.(*config.ValidationError)
+	if !ok {
+		t.Fatalf("ParseDocument() error type = %T, want *config.ValidationError", err)
+	}
+	actualReasons := strings.Join(validationErr.Reasons, "\n")
+	if !strings.Contains(actualReasons, "profiles must contain at least one profile") {
+		t.Fatalf("validation reasons missing empty profiles error in %q", actualReasons)
+	}
+}
+
+func TestParseUpdateDocumentWithLegacyPayloadPreservesExistingProfiles(t *testing.T) {
+	currentDocument := config.DefaultDocument()
+	currentDocument.StorageFormat = config.StorageFormatProfiles
+	currentDocument.TunnelEnabled = true
+	currentDocument.ActiveProfileID = "primary"
+	currentDocument.Server.Port = 9876
+	currentDocument.Profiles = []config.Profile{
+		{
+			ID:   "primary",
+			Name: "Primary",
+			Config: config.ProfileConfig{
+				Tunnel: config.TunnelConfig{
+					Broker:         "he",
+					RemoteEndpoint: "216.66.80.90",
+					LocalIPv6:      "2001:470::2/64",
+					RemoteIPv6:     "2001:470::1/64",
+					TTL:            255,
+					MTU:            1480,
+				},
+				LAN:    config.LANConfig{Enabled: false, DNS: []string{}, Mode: "slaac", Networks: []config.NetworkConfig{}},
+				Health: config.HealthConfig{Enabled: true, IntervalSec: 30, Target: "2001:4860:4860::8888", AutoRestart: true},
+			},
+		},
+		{
+			ID:   "backup",
+			Name: "Backup",
+			Config: config.ProfileConfig{
+				Tunnel: config.TunnelConfig{
+					Broker:         "custom",
+					RemoteEndpoint: "198.51.100.10",
+					LocalIPv6:      "2001:db8::2/64",
+					RemoteIPv6:     "2001:db8::1/64",
+					TTL:            255,
+					MTU:            0,
+				},
+				LAN:    config.LANConfig{Enabled: false, DNS: []string{}, Mode: "slaac", Networks: []config.NetworkConfig{}},
+				Health: config.HealthConfig{Enabled: true, IntervalSec: 30, Target: "2001:4860:4860::8888", AutoRestart: true},
+			},
+		},
+	}
+	body := []byte(`{
+		"tunnel": {
+			"enabled": true,
+			"broker": "ip4market",
+			"remote_endpoint": "203.0.113.5",
+			"local_ipv6": "2001:db8:ffff::2/64",
+			"remote_ipv6": "2001:db8:ffff::1/64",
+			"ttl": 64,
+			"mtu": 1472
+		},
+		"lan": {
+			"enabled": false,
+			"dns": [],
+			"mode": "slaac",
+			"networks": []
+		},
+		"health": {
+			"enabled": true,
+			"interval_sec": 45,
+			"target": "2001:4860:4860::8888",
+			"auto_restart": false
+		},
+		"server": {
+			"wan_interface": "ppp0",
+			"auth_token": "new-token"
+		}
+	}`)
+	updatedDocument, err := config.ParseUpdateDocument(body, currentDocument)
+	if err != nil {
+		t.Fatalf("ParseUpdateDocument() error: %v", err)
+	}
+	if updatedDocument.StorageFormat != config.StorageFormatProfiles {
+		t.Fatalf("StorageFormat = %q, want %q", updatedDocument.StorageFormat, config.StorageFormatProfiles)
+	}
+	if updatedDocument.ActiveProfileID != "primary" {
+		t.Fatalf("ActiveProfileID = %q, want %q", updatedDocument.ActiveProfileID, "primary")
+	}
+	if len(updatedDocument.Profiles) != 2 {
+		t.Fatalf("len(Profiles) = %d, want 2", len(updatedDocument.Profiles))
+	}
+	if updatedDocument.Server.Port != 9876 {
+		t.Fatalf("Server.Port = %d, want preserved 9876", updatedDocument.Server.Port)
+	}
+	if updatedDocument.Profiles[1].ID != "backup" {
+		t.Fatalf("Profiles[1].ID = %q, want backup", updatedDocument.Profiles[1].ID)
+	}
+	if updatedDocument.Profiles[0].Config.Tunnel.Broker != "ip4market" {
+		t.Fatalf("Profiles[0].Config.Tunnel.Broker = %q, want ip4market", updatedDocument.Profiles[0].Config.Tunnel.Broker)
+	}
+}
+
 func TestLoadConfigStillReturnsEffectiveLegacyCompatibleConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

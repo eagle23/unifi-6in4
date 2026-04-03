@@ -140,27 +140,32 @@ func (s *Service) UpdateConfig(cfg *config.Config) error {
 
 // UpdateConfigDocument saves a new desired config document and reconciles it immediately.
 func (s *Service) UpdateConfigDocument(document *config.Document) error {
+	if document == nil {
+		return fmt.Errorf("config document is required")
+	}
 	updatedDocument := document.Clone()
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	currentDocument := s.document.Clone()
-	s.mu.Unlock()
+	currentConfig := s.config.Clone()
+	currentState := s.state.Clone()
 	preserveDocumentStartupFields(updatedDocument, currentDocument)
-	updatedDocumentCopy := updatedDocument.Clone()
-	if err := updatedDocumentCopy.Validate(); err != nil {
+	if err := updatedDocument.Validate(); err != nil {
 		return err
 	}
-	updatedConfig, err := updatedDocumentCopy.ActiveConfig()
+	updatedConfig, err := updatedDocument.ActiveConfig()
 	if err != nil {
 		return err
 	}
-	if err := config.SaveDocument(s.configPath, updatedDocumentCopy); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.document = updatedDocumentCopy
+	s.document = updatedDocument
 	s.config = updatedConfig
-	s.mu.Unlock()
-	return s.reconcile(false)
+	if err := s.reconcileLocked(false); err != nil {
+		return s.rollbackConfigUpdateLocked(currentDocument, currentConfig, currentState, err)
+	}
+	if err := config.SaveDocument(s.configPath, updatedDocument); err != nil {
+		return s.rollbackConfigUpdateLocked(currentDocument, currentConfig, currentState, err)
+	}
+	return nil
 }
 
 // Up enables the desired tunnel state and reconciles it.
@@ -260,6 +265,10 @@ func (s *Service) runHealthCheck(allowAutoRestart bool) (*tunnel.Status, error) 
 func (s *Service) reconcile(force bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.reconcileLocked(force)
+}
+
+func (s *Service) reconcileLocked(force bool) error {
 	document := s.document.Clone()
 	cfg := s.config.Clone()
 	validationErr := cfg.Validate()
@@ -352,6 +361,23 @@ func (s *Service) reconcile(force bool) error {
 		return observeErr
 	}
 	return nil
+}
+
+func (s *Service) rollbackConfigUpdateLocked(previousDocument *config.Document, previousConfig *config.Config, previousState *StateDocument, updateErr error) error {
+	s.document = previousDocument.Clone()
+	s.config = previousConfig.Clone()
+	s.state = previousState.Clone()
+	rollbackErr := s.reconcileLocked(true)
+	if rollbackErr == nil {
+		return updateErr
+	}
+	s.document = previousDocument.Clone()
+	s.config = previousConfig.Clone()
+	s.state = previousState.Clone()
+	if err := SaveState(s.statePath, s.state); err != nil {
+		return fmt.Errorf("%w; rollback failed: %v; restore state failed: %v", updateErr, rollbackErr, err)
+	}
+	return fmt.Errorf("%w; rollback failed: %v", updateErr, rollbackErr)
 }
 
 func (s *Service) startAdvertiserLocked(cfg *config.Config) error {

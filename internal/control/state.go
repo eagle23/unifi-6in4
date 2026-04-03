@@ -76,6 +76,19 @@ func (s *StateDocument) CloneStatus() *tunnel.Status {
 	return s.Status.Clone()
 }
 
+// Clone returns a deep copy of the state document.
+func (s *StateDocument) Clone() *StateDocument {
+	if s == nil {
+		return nil
+	}
+	clone := &StateDocument{
+		Status:  *s.Status.Clone(),
+		Applied: s.Applied,
+	}
+	clone.Applied.Networks = append([]tunnel.NetworkStatus(nil), s.Applied.Networks...)
+	return clone
+}
+
 func buildAppliedState(cfg *config.Config) AppliedState {
 	networks := make([]tunnel.NetworkStatus, 0, len(cfg.LAN.Networks))
 	for _, network := range cfg.LAN.Networks {
@@ -92,4 +105,3 @@ func buildAppliedState(cfg *config.Config) AppliedState {
 		Networks:       networks,
 	}
 }
-

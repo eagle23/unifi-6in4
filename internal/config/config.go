@@ -248,14 +248,10 @@ func ParseUpdate(data []byte, current *Config) (*Config, error) {
 
 // ParseUpdateDocument reads a document intended for PUT /api/config.
 func ParseUpdateDocument(data []byte, current *Document) (*Document, error) {
-	document, err := ParseDocument(data)
-	if err != nil {
-		return nil, err
+	if isProfilesFormat(data) {
+		return parseProfilesDocument(data)
 	}
-	if current != nil && strings.TrimSpace(document.StorageFormat) == "" {
-		document.StorageFormat = current.StorageFormat
-	}
-	return document, nil
+	return parseLegacyUpdateDocument(data, current)
 }
 
 // Save marshals cfg as a legacy config and writes it atomically to path.
@@ -582,13 +578,6 @@ func (d *Document) applyDefaults() {
 	if strings.TrimSpace(d.ActiveProfileID) == "" {
 		d.ActiveProfileID = defaultProfileID
 	}
-	if len(d.Profiles) == 0 {
-		d.Profiles = []Profile{{
-			ID:     defaultProfileID,
-			Name:   defaultProfileName,
-			Config: DefaultProfileConfig(),
-		}}
-	}
 	for index := range d.Profiles {
 		d.Profiles[index].Config.applyDefaults()
 	}
@@ -707,6 +696,38 @@ func parseProfilesDocument(data []byte) (*Document, error) {
 	return document, nil
 }
 
+func parseLegacyUpdateDocument(data []byte, current *Document) (*Document, error) {
+	cfg, err := parseLegacyConfig(data)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		document := DocumentFromConfig(cfg, StorageFormatLegacy)
+		document.refreshProfileValidation()
+		return document, nil
+	}
+	var raw rawConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse config for update migration: %w", err)
+	}
+	document := current.Clone()
+	if raw.Tunnel.Enabled == nil {
+		cfg.Tunnel.Enabled = current.TunnelEnabled
+	}
+	if raw.Server.Port == nil {
+		cfg.Server.Port = current.Server.Port
+	}
+	document.TunnelEnabled = cfg.Tunnel.Enabled
+	document.Server = cfg.Server
+	if err := replaceDocumentActiveProfileConfig(document, cfg); err != nil {
+		return nil, err
+	}
+	if err := document.Validate(); err != nil {
+		return nil, err
+	}
+	return document, nil
+}
+
 func buildRawProfileDocument(document *Document) rawProfileDocument {
 	rawDocument := rawProfileDocument{
 		TunnelEnabled:   boolPointer(document.TunnelEnabled),
@@ -737,6 +758,28 @@ func buildRawProfileDocument(document *Document) rawProfileDocument {
 		})
 	}
 	return rawDocument
+}
+
+func replaceDocumentActiveProfileConfig(document *Document, cfg *Config) error {
+	if document == nil {
+		return fmt.Errorf("config document is required")
+	}
+	if cfg == nil {
+		return fmt.Errorf("config is required")
+	}
+	for index := range document.Profiles {
+		if document.Profiles[index].ID != document.ActiveProfileID {
+			continue
+		}
+		document.Profiles[index].Config = ProfileConfig{
+			Tunnel: cfg.Tunnel,
+			LAN:    cfg.LAN,
+			Health: cfg.Health,
+		}
+		document.Profiles[index].Config.Tunnel.Enabled = false
+		return nil
+	}
+	return fmt.Errorf("active profile %q not found", document.ActiveProfileID)
 }
 
 func validationReasonsForConfig(cfg *Config) []string {
