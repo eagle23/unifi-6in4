@@ -26,6 +26,7 @@ type Service struct {
 	configPath string
 	statePath  string
 	backend    Backend
+	document   *config.Document
 	config     *config.Config
 	state      *StateDocument
 	advertiser *ra.Advertiser
@@ -46,7 +47,7 @@ func NewService(params ServiceParams) (*Service, error) {
 	if backend == nil {
 		backend = NewSystemBackend()
 	}
-	cfg, err := loadOrCreateConfig(params.ConfigPath)
+	document, cfg, err := loadOrCreateConfigDocument(params.ConfigPath)
 	if err != nil {
 		return nil, err
 	}
@@ -58,6 +59,7 @@ func NewService(params ServiceParams) (*Service, error) {
 		configPath: params.ConfigPath,
 		statePath:  params.StatePath,
 		backend:    backend,
+		document:   document,
 		config:     cfg,
 		state:      state,
 		stopCh:     make(chan struct{}),
@@ -92,11 +94,20 @@ func (s *Service) GetConfig() *config.Config {
 	return s.config.Clone()
 }
 
+// GetConfigDocument returns the current desired config document.
+func (s *Service) GetConfigDocument() *config.Document {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	document := s.document.Clone()
+	_ = document.Validate()
+	return document
+}
+
 // CurrentToken returns the current auth token.
 func (s *Service) CurrentToken() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.config.Server.AuthToken
+	return s.document.Server.AuthToken
 }
 
 // Status returns the last observed state snapshot.
@@ -113,35 +124,56 @@ func (s *Service) Health() (*tunnel.Status, error) {
 
 // UpdateConfig saves a new desired config and reconciles it immediately.
 func (s *Service) UpdateConfig(cfg *config.Config) error {
-	updated := cfg.Clone()
+	if cfg == nil {
+		return fmt.Errorf("config is required")
+	}
 	s.mu.Lock()
-	current := s.config.Clone()
+	nextDocument := s.document.Clone()
 	s.mu.Unlock()
-	preserveStartupFields(updated, current)
-	updated.ApplyDefaults()
-	if err := updated.Validate(); err != nil {
+	nextDocument.TunnelEnabled = cfg.Tunnel.Enabled
+	nextDocument.Server = cfg.Server
+	if err := replaceActiveProfileConfig(nextDocument, cfg); err != nil {
 		return err
 	}
-	if err := config.Save(s.configPath, updated); err != nil {
+	return s.UpdateConfigDocument(nextDocument)
+}
+
+// UpdateConfigDocument saves a new desired config document and reconciles it immediately.
+func (s *Service) UpdateConfigDocument(document *config.Document) error {
+	updatedDocument := document.Clone()
+	s.mu.Lock()
+	currentDocument := s.document.Clone()
+	s.mu.Unlock()
+	preserveDocumentStartupFields(updatedDocument, currentDocument)
+	updatedDocumentCopy := updatedDocument.Clone()
+	if err := updatedDocumentCopy.Validate(); err != nil {
+		return err
+	}
+	updatedConfig, err := updatedDocumentCopy.ActiveConfig()
+	if err != nil {
+		return err
+	}
+	if err := config.SaveDocument(s.configPath, updatedDocumentCopy); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.config = updated
+	s.document = updatedDocumentCopy
+	s.config = updatedConfig
 	s.mu.Unlock()
 	return s.reconcile(false)
 }
 
 // Up enables the desired tunnel state and reconciles it.
 func (s *Service) Up() error {
-	return s.mutateConfig(func(cfg *config.Config) {
-		cfg.Tunnel.Enabled = true
+	return s.mutateDocument(func(document *config.Document) {
+		document.TunnelEnabled = true
 	})
 }
 
 // Down disables the desired tunnel state and reconciles it.
 func (s *Service) Down() error {
-	return s.mutateConfig(func(cfg *config.Config) {
-		cfg.Tunnel.Enabled = false
+	return s.mutateDocument(func(document *config.Document) {
+		document.TunnelEnabled = false
 	})
 }
 
@@ -150,22 +182,12 @@ func (s *Service) Restart() error {
 	return s.reconcile(true)
 }
 
-func (s *Service) mutateConfig(mutate func(cfg *config.Config)) error {
+func (s *Service) mutateDocument(mutate func(document *config.Document)) error {
 	s.mu.Lock()
-	nextConfig := s.config.Clone()
+	nextDocument := s.document.Clone()
 	s.mu.Unlock()
-	mutate(nextConfig)
-	nextConfig.ApplyDefaults()
-	if err := nextConfig.Validate(); err != nil {
-		return err
-	}
-	if err := config.Save(s.configPath, nextConfig); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.config = nextConfig
-	s.mu.Unlock()
-	return s.reconcile(false)
+	mutate(nextDocument)
+	return s.UpdateConfigDocument(nextDocument)
 }
 
 func (s *Service) healthLoop() {
@@ -190,7 +212,7 @@ func (s *Service) healthLoop() {
 func (s *Service) shouldRetryReconcile() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.config.Tunnel.Enabled {
+	if !s.document.TunnelEnabled {
 		return false
 	}
 	if s.state.ReconcileState == tunnel.ReconcileReady {
@@ -238,12 +260,20 @@ func (s *Service) runHealthCheck(allowAutoRestart bool) (*tunnel.Status, error) 
 func (s *Service) reconcile(force bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	document := s.document.Clone()
 	cfg := s.config.Clone()
 	validationErr := cfg.Validate()
 	validationReasons := validationReasons(validationErr)
 	previousApplied := s.state.Applied
 	s.state.Interface = tunnel.InterfaceName
-	s.state.DesiredEnabled = cfg.Tunnel.Enabled
+	s.state.DesiredEnabled = document.TunnelEnabled
+	s.state.ActiveProfileID = document.ActiveProfileID
+	s.state.ActiveProfileName = ""
+	s.state.ActiveBroker = ""
+	if activeProfile, err := document.ActiveProfile(); err == nil {
+		s.state.ActiveProfileName = activeProfile.Name
+		s.state.ActiveBroker = activeProfile.Config.Tunnel.Broker
+	}
 	s.state.ConfigValid = len(validationReasons) == 0
 	s.state.ReconcileState = tunnel.ReconcileReconciling
 	s.stopAdvertiserLocked()
@@ -457,23 +487,49 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
-func preserveStartupFields(nextConfig *config.Config, currentConfig *config.Config) {
-	if nextConfig.Server.Port == 0 {
-		nextConfig.Server.Port = currentConfig.Server.Port
+func replaceActiveProfileConfig(document *config.Document, cfg *config.Config) error {
+	if document == nil {
+		return fmt.Errorf("config document is required")
+	}
+	if cfg == nil {
+		return fmt.Errorf("config is required")
+	}
+	for index := range document.Profiles {
+		if document.Profiles[index].ID != document.ActiveProfileID {
+			continue
+		}
+		document.Profiles[index].Config = config.ProfileConfig{
+			Tunnel: cfg.Tunnel,
+			LAN:    cfg.LAN,
+			Health: cfg.Health,
+		}
+		document.Profiles[index].Config.Tunnel.Enabled = false
+		return nil
+	}
+	return fmt.Errorf("active profile %q not found", document.ActiveProfileID)
+}
+
+func preserveDocumentStartupFields(nextDocument *config.Document, currentDocument *config.Document) {
+	if nextDocument.Server.Port == 0 {
+		nextDocument.Server.Port = currentDocument.Server.Port
 	}
 }
 
-func loadOrCreateConfig(path string) (*config.Config, error) {
-	cfg, err := config.Load(path)
+func loadOrCreateConfigDocument(path string) (*config.Document, *config.Config, error) {
+	document, err := config.LoadDocument(path)
 	if err == nil {
-		return cfg, nil
+		cfg, activeErr := document.ActiveConfig()
+		if activeErr != nil {
+			return nil, nil, activeErr
+		}
+		return document, cfg, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+		return nil, nil, err
 	}
-	cfg = config.Defaults()
+	cfg := config.Defaults()
 	if err := config.Save(path, cfg); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return cfg, nil
+	return config.DocumentFromConfig(cfg, config.StorageFormatLegacy), cfg, nil
 }

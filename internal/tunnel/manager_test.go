@@ -3,9 +3,9 @@ package tunnel_test
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,15 +23,18 @@ func TestClientStatus(t *testing.T) {
 			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
 		}
 		status := tunnel.Status{
-			TunnelUp:       true,
-			Interface:      tunnel.InterfaceName,
-			WANIPv4:        "78.36.199.233",
-			LocalIPv6:      "2001:470::2/64",
-			PingOK:         true,
-			PingMs:         42,
-			ConfigValid:    true,
-			DesiredEnabled: true,
-			ReconcileState: "ready",
+			TunnelUp:          true,
+			Interface:         tunnel.InterfaceName,
+			WANIPv4:           "78.36.199.233",
+			LocalIPv6:         "2001:470::2/64",
+			PingOK:            true,
+			PingMs:            42,
+			ConfigValid:       true,
+			DesiredEnabled:    true,
+			ReconcileState:    "ready",
+			ActiveProfileID:   "he-home",
+			ActiveProfileName: "HE Home",
+			ActiveBroker:      "he",
 		}
 		_ = json.NewEncoder(w).Encode(status)
 	}))
@@ -49,6 +52,9 @@ func TestClientStatus(t *testing.T) {
 	}
 	if status.ReconcileState != "ready" {
 		t.Errorf("ReconcileState = %q, want %q", status.ReconcileState, "ready")
+	}
+	if status.ActiveProfileID != "he-home" {
+		t.Errorf("ActiveProfileID = %q, want %q", status.ActiveProfileID, "he-home")
 	}
 }
 

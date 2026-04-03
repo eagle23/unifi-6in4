@@ -33,20 +33,23 @@ type NetworkStatus struct {
 
 // Status holds the current state of the 6in4 tunnel.
 type Status struct {
-	TunnelUp        bool            `json:"tunnel_up"`
-	Interface       string          `json:"interface"`
-	LocalIPv6       string          `json:"local_ipv6"`
-	EffectiveMTU    int             `json:"effective_mtu"`
-	WANIPv4         string          `json:"wan_ipv4"`
-	Networks        []NetworkStatus `json:"networks"`
-	PingOK          bool            `json:"ping_ok"`
-	PingMs          int             `json:"ping_ms"`
-	ConfigValid     bool            `json:"config_valid"`
-	DesiredEnabled  bool            `json:"desired_enabled"`
-	ReconcileState  string          `json:"reconcile_state"`
-	LastError       string          `json:"last_error"`
-	DegradedReasons []string        `json:"degraded_reasons"`
-	LastReconcileAt time.Time       `json:"last_reconcile_at"`
+	TunnelUp          bool            `json:"tunnel_up"`
+	Interface         string          `json:"interface"`
+	LocalIPv6         string          `json:"local_ipv6"`
+	EffectiveMTU      int             `json:"effective_mtu"`
+	WANIPv4           string          `json:"wan_ipv4"`
+	ActiveProfileID   string          `json:"active_profile_id"`
+	ActiveProfileName string          `json:"active_profile_name"`
+	ActiveBroker      string          `json:"active_broker"`
+	Networks          []NetworkStatus `json:"networks"`
+	PingOK            bool            `json:"ping_ok"`
+	PingMs            int             `json:"ping_ms"`
+	ConfigValid       bool            `json:"config_valid"`
+	DesiredEnabled    bool            `json:"desired_enabled"`
+	ReconcileState    string          `json:"reconcile_state"`
+	LastError         string          `json:"last_error"`
+	DegradedReasons   []string        `json:"degraded_reasons"`
+	LastReconcileAt   time.Time       `json:"last_reconcile_at"`
 }
 
 // Clone returns a deep copy of Status.

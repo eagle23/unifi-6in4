@@ -17,8 +17,8 @@ type Controller interface {
 	Up() error
 	Down() error
 	Restart() error
-	GetConfig() *config.Config
-	UpdateConfig(cfg *config.Config) error
+	GetConfigDocument() *config.Document
+	UpdateConfigDocument(document *config.Document) error
 }
 
 // Handler holds the HTTP handler dependencies.
@@ -70,7 +70,7 @@ func (h *Handler) HandleTunnelRestart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleGetConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.controller.GetConfig())
+	writeJSON(w, http.StatusOK, h.controller.GetConfigDocument())
 }
 
 func (h *Handler) HandleUpdateConfig(w http.ResponseWriter, r *http.Request) {
@@ -79,12 +79,12 @@ func (h *Handler) HandleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	cfg, err := config.ParseUpdate(body, h.controller.GetConfig())
+	document, err := config.ParseUpdateDocument(body, h.controller.GetConfigDocument())
 	if err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := h.controller.UpdateConfig(cfg); err != nil {
+	if err := h.controller.UpdateConfigDocument(document); err != nil {
 		writeControlError(w, err)
 		return
 	}

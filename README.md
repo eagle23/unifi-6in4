@@ -179,6 +179,8 @@ Map the HE tunnel page like this:
 - `Client IPv6 Address` -> `tunnel.local_ipv6`
 - `Routed /64` -> `lan.networks[].prefix`
 
+In profiles mode those same values live inside `profiles[].config.tunnel` and `profiles[].config.lan`.
+
 Your public WAN IPv4 is not entered manually. The daemon reads it from the configured WAN interface.
 
 ### Minimal example
@@ -234,6 +236,71 @@ Then either:
 ```bash
 ssh root@192.168.1.1 '/data/ipv6-tunnel/ipv6-tunnel-server ctl up'
 ```
+
+## Named Profiles and Legacy Compatibility
+
+The daemon now supports multiple named 6in4 profiles, while keeping only one active at a time.
+
+- `server.*` and `tunnel_enabled` stay global.
+- Each profile has its own `name`, `tunnel`, `lan`, and `health`.
+- `broker` is now a validated preset/tag for UI hints and placeholders. It does not change the 6in4 dataplane logic.
+- Supported `broker` values: `he`, `ip4market`, `6in4ru`, `custom`.
+
+The current legacy single-profile `config.json` is still supported.
+
+- Existing installs keep working without conversion.
+- `ctl up`, `ctl down`, `ctl restart`, and normal daemon startup do not rewrite a legacy config into the new format.
+- One-way migration to the profiles document happens only after a profile-specific action such as create, duplicate, rename, delete, or switching active profile in the UI.
+
+### Profiles document format
+
+```json
+{
+  "tunnel_enabled": true,
+  "active_profile_id": "he-home",
+  "profiles": [
+    {
+      "id": "he-home",
+      "name": "HE Home",
+      "config": {
+        "tunnel": {
+          "broker": "he",
+          "remote_endpoint": "216.66.80.90",
+          "local_ipv6": "2001:470:27:103d::2/64",
+          "remote_ipv6": "2001:470:27:103d::1/64",
+          "ttl": 255,
+          "mtu": 0
+        },
+        "lan": {
+          "enabled": true,
+          "dns": [],
+          "mode": "slaac",
+          "networks": [
+            {
+              "interface": "br0",
+              "prefix": "2001:470:28:1038::/64",
+              "comment": "Default LAN"
+            }
+          ]
+        },
+        "health": {
+          "enabled": true,
+          "interval_sec": 30,
+          "target": "2001:4860:4860::8888",
+          "auto_restart": true
+        }
+      }
+    }
+  ],
+  "server": {
+    "port": 9086,
+    "wan_interface": "ppp0",
+    "auth_token": ""
+  }
+}
+```
+
+Inactive profiles may be saved as drafts with invalid tunnel values, but the active profile must validate.
 
 ## CLI
 
@@ -300,7 +367,7 @@ If your broker only gives you one routed `/64`, you should normally advertise it
 If you want multiple VLANs with clean routed IPv6, you need either:
 
 - a larger delegated prefix;
-- multiple brokers and policy design;
+- multiple named broker profiles and policy design;
 - or a different model such as ULA + NPTv6/NAT66.
 
 ## How to Verify It Works

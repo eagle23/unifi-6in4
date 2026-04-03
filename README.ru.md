@@ -183,6 +183,8 @@ make deploy ROUTER_HOST=192.168.1.1 ROUTER_USER=root
 - `Client IPv6 Address` -> `tunnel.local_ipv6`
 - `Routed /64` -> `lan.networks[].prefix`
 
+В режиме profiles те же значения лежат внутри `profiles[].config.tunnel` и `profiles[].config.lan`.
+
 Твой публичный WAN IPv4 руками никуда вводить не надо. Daemon читает его сам с WAN-интерфейса.
 
 ### Минимальный пример конфига
@@ -238,6 +240,71 @@ make deploy ROUTER_HOST=192.168.1.1 ROUTER_USER=root
 ```bash
 ssh root@192.168.1.1 '/data/ipv6-tunnel/ipv6-tunnel-server ctl up'
 ```
+
+## Именованные профили и совместимость с legacy config
+
+Теперь daemon умеет хранить несколько именованных 6in4-профилей, но активным остаётся только один.
+
+- `server.*` и `tunnel_enabled` остаются глобальными.
+- У каждого профиля свои `name`, `tunnel`, `lan` и `health`.
+- `broker` теперь не декоративный: это валидируемый preset/tag для UI hints и placeholder-ов. На dataplane-логику 6in4 он не влияет.
+- Поддерживаемые значения `broker`: `he`, `ip4market`, `6in4ru`, `custom`.
+
+Текущий legacy single-profile `config.json` по-прежнему поддерживается.
+
+- Уже работающие инсталляции продолжают работать без конверсии.
+- `ctl up`, `ctl down`, `ctl restart` и обычный старт daemon не переписывают legacy config в новый формат.
+- One-way migration в profiles document происходит только после profile-specific действия: create, duplicate, rename, delete или switch active profile через UI.
+
+### Формат profiles document
+
+```json
+{
+  "tunnel_enabled": true,
+  "active_profile_id": "he-home",
+  "profiles": [
+    {
+      "id": "he-home",
+      "name": "HE Home",
+      "config": {
+        "tunnel": {
+          "broker": "he",
+          "remote_endpoint": "216.66.80.90",
+          "local_ipv6": "2001:470:27:103d::2/64",
+          "remote_ipv6": "2001:470:27:103d::1/64",
+          "ttl": 255,
+          "mtu": 0
+        },
+        "lan": {
+          "enabled": true,
+          "dns": [],
+          "mode": "slaac",
+          "networks": [
+            {
+              "interface": "br0",
+              "prefix": "2001:470:28:1038::/64",
+              "comment": "Default LAN"
+            }
+          ]
+        },
+        "health": {
+          "enabled": true,
+          "interval_sec": 30,
+          "target": "2001:4860:4860::8888",
+          "auto_restart": true
+        }
+      }
+    }
+  ],
+  "server": {
+    "port": 9086,
+    "wan_interface": "ppp0",
+    "auth_token": ""
+  }
+}
+```
+
+Неактивные профили можно хранить как draft даже с невалидными tunnel-полями, но активный профиль обязан проходить валидацию.
 
 ## CLI
 
@@ -304,7 +371,7 @@ UI должен быть доступен даже если:
 Если нужен чистый routed IPv6 сразу в нескольких VLAN, понадобится:
 
 - либо более крупный delegated prefix;
-- либо несколько брокеров и policy-схема;
+- либо несколько именованных broker profiles и policy-схема;
 - либо другой подход вроде ULA + NPTv6/NAT66.
 
 ## Как проверить, что всё работает

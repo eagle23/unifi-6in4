@@ -55,6 +55,9 @@
   .controls {
     display: flex; gap: 8px; margin-bottom: 16px;
   }
+  .profile-actions {
+    display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px;
+  }
   button {
     padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer;
     font-size: 14px; font-weight: 500; transition: background 0.2s;
@@ -109,9 +112,29 @@
     margin-top: 20px; width: 100%;
     background: var(--accent); color: white; padding: 12px;
   }
+  .btn-secondary {
+    background: var(--bg3);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover {
+    background: #1a4778;
+  }
   .btn-save:hover { background: var(--accent-hover); }
   .checkbox-group { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
   .checkbox-group input[type="checkbox"] { width: auto; }
+  .hint {
+    margin-top: 8px;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .hint strong {
+    color: var(--text);
+  }
+  .hint-err {
+    color: #ff9f9f;
+  }
   .toast {
     position: fixed; bottom: 20px; right: 20px; padding: 12px 20px;
     border-radius: 8px; font-size: 14px; display: none; z-index: 100;
@@ -150,6 +173,14 @@
       <span class="status-value" id="st-desired">disabled</span>
     </div>
     <div class="status-row">
+      <span class="status-label">Active Profile</span>
+      <span class="status-value" id="st-profile">-</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Broker</span>
+      <span class="status-value" id="st-broker">-</span>
+    </div>
+    <div class="status-row">
       <span class="status-label">Interface</span>
       <span class="status-value" id="st-iface">-</span>
     </div>
@@ -185,6 +216,26 @@
   <details class="settings">
     <summary>Settings</summary>
     <form id="config-form" onsubmit="saveConfig(event)">
+      <div class="section-title">Profiles</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Selected Profile</label>
+          <select id="cfg-profile-select"></select>
+        </div>
+        <div class="form-group">
+          <label>Profile Name</label>
+          <input id="cfg-profile-name" placeholder="HE Home" required>
+        </div>
+      </div>
+      <div class="profile-actions">
+        <button type="button" class="btn-secondary btn-sm" onclick="createProfile()">New</button>
+        <button type="button" class="btn-secondary btn-sm" onclick="duplicateProfile()">Duplicate</button>
+        <button type="button" class="btn-secondary btn-sm" onclick="renameProfile()">Rename</button>
+        <button type="button" class="btn-secondary btn-sm" onclick="deleteProfile()">Delete</button>
+        <button type="button" class="btn-secondary btn-sm" onclick="activateProfile()">Activate</button>
+      </div>
+      <div id="profile-meta" class="hint"></div>
+
       <div class="section-title">Tunnel</div>
       <div class="form-group">
         <label>Broker</label>
@@ -194,6 +245,7 @@
           <option value="6in4ru">6in4.ru</option>
           <option value="custom">Custom</option>
         </select>
+        <div id="broker-hint" class="hint"></div>
       </div>
       <div class="form-group">
         <label>Remote Endpoint (IPv4)</label>
@@ -284,6 +336,7 @@
 <script>
 const API = window.location.origin;
 let authToken = localStorage.getItem('ipv6tunnel_token') || '';
+let configDocument = null;
 let currentTunnelEnabled = false;
 let currentServerPort = 9086;
 let currentConfiguredMTU = 0;
@@ -291,6 +344,38 @@ let lastStatus = null;
 let currentAutoDNSValues = [];
 let isUsingAutoDNS = false;
 let isDNSManuallyEdited = false;
+let selectedProfileId = '';
+
+const brokerPresets = {
+  he: {
+    label: 'Hurricane Electric',
+    description: 'Classic tunnelbroker.net style 6in4 tunnel.',
+    remoteEndpoint: '216.66.80.90',
+    localIPv6: '2001:470:..::2/64',
+    remoteIPv6: '2001:470:..::1/64'
+  },
+  ip4market: {
+    label: 'ip4market.ru',
+    description: 'Provider preset with the same 6in4 runtime, just different broker-specific values.',
+    remoteEndpoint: 'broker IPv4 from provider',
+    localIPv6: 'client tunnel IPv6/64',
+    remoteIPv6: 'server tunnel IPv6/64'
+  },
+  "6in4ru": {
+    label: '6in4.ru',
+    description: 'Manual 6in4 values from 6in4.ru. Runtime logic stays identical.',
+    remoteEndpoint: 'broker IPv4 from provider',
+    localIPv6: 'client tunnel IPv6/64',
+    remoteIPv6: 'server tunnel IPv6/64'
+  },
+  custom: {
+    label: 'Custom',
+    description: 'Fully manual profile. Fill all tunnel values yourself.',
+    remoteEndpoint: '203.0.113.1',
+    localIPv6: '2001:db8::2/64',
+    remoteIPv6: '2001:db8::1/64'
+  }
+};
 
 function headers() {
   const h = {'Content-Type': 'application/json'};
@@ -334,6 +419,8 @@ async function refreshStatus() {
     badge.textContent = st.tunnel_up ? 'UP' : 'DOWN';
     badge.className = 'badge ' + (st.tunnel_up ? 'badge-up' : 'badge-down');
     document.getElementById('st-desired').textContent = st.desired_enabled ? 'enabled' : 'disabled';
+    document.getElementById('st-profile').textContent = st.active_profile_name || st.active_profile_id || '-';
+    document.getElementById('st-broker').textContent = st.active_broker || '-';
     document.getElementById('st-iface').textContent = st.interface || '-';
     document.getElementById('st-wan').textContent = st.wan_ipv4 || '-';
     document.getElementById('st-ipv6').textContent = st.local_ipv6 || '-';
@@ -392,6 +479,300 @@ function addNetwork(iface, prefix, comment) {
   refreshAutoDNSField();
 }
 
+function deepClone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function getSelectedProfile() {
+  if (!configDocument || !Array.isArray(configDocument.profiles)) return null;
+  return configDocument.profiles.find(profile => profile.id === selectedProfileId) || null;
+}
+
+function ensureSelectedProfile() {
+  if (!configDocument || !configDocument.profiles || configDocument.profiles.length === 0) return;
+  const selectedProfile = getSelectedProfile();
+  if (selectedProfile) return;
+  selectedProfileId = configDocument.active_profile_id || configDocument.profiles[0].id;
+}
+
+function slugifyProfileId(name) {
+  const slug = String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  return slug || 'profile';
+}
+
+function makeUniqueProfileId(baseId) {
+  const usedIds = new Set((configDocument?.profiles || []).map(profile => profile.id));
+  if (!usedIds.has(baseId)) return baseId;
+  let suffix = 2;
+  while (usedIds.has(baseId + '-' + suffix)) suffix += 1;
+  return baseId + '-' + suffix;
+}
+
+function makeUniqueProfileName(baseName) {
+  const usedNames = new Set((configDocument?.profiles || []).map(profile => profile.name));
+  if (!usedNames.has(baseName)) return baseName;
+  let suffix = 2;
+  while (usedNames.has(baseName + ' ' + suffix)) suffix += 1;
+  return baseName + ' ' + suffix;
+}
+
+function buildProfileOptionLabel(profile) {
+  const parts = [profile.name || profile.id];
+  if (profile.id === configDocument.active_profile_id) parts.push('active');
+  if (profile.is_valid === false) parts.push('draft');
+  return parts.join(' · ');
+}
+
+function renderProfileSelect() {
+  ensureSelectedProfile();
+  const select = document.getElementById('cfg-profile-select');
+  select.innerHTML = '';
+  (configDocument.profiles || []).forEach(profile => {
+    const option = document.createElement('option');
+    option.value = profile.id;
+    option.textContent = buildProfileOptionLabel(profile);
+    if (profile.id === selectedProfileId) option.selected = true;
+    select.appendChild(option);
+  });
+}
+
+function renderBrokerHint() {
+  const broker = document.getElementById('cfg-broker').value || 'custom';
+  const preset = brokerPresets[broker] || brokerPresets.custom;
+  document.getElementById('broker-hint').innerHTML =
+    '<strong>' + esc(preset.label) + '</strong>: ' + esc(preset.description);
+  document.getElementById('cfg-remote-endpoint').placeholder = preset.remoteEndpoint;
+  document.getElementById('cfg-local-ipv6').placeholder = preset.localIPv6;
+  document.getElementById('cfg-remote-ipv6').placeholder = preset.remoteIPv6;
+}
+
+function renderProfileMeta() {
+  const profile = getSelectedProfile();
+  const meta = document.getElementById('profile-meta');
+  if (!profile) {
+    meta.textContent = 'No profile selected';
+    return;
+  }
+  const parts = [];
+  parts.push((profile.id === configDocument.active_profile_id ? 'Active' : 'Draft') + ' profile');
+  parts.push('ID: ' + profile.id);
+  parts.push('Storage: ' + (configDocument.storage_format || 'profiles'));
+  if (profile.is_valid === false && Array.isArray(profile.validation_errors) && profile.validation_errors.length > 0) {
+    meta.className = 'hint hint-err';
+    meta.innerHTML = parts.join(' · ') + '<br>' + esc(profile.validation_errors.join(' | '));
+    return;
+  }
+  meta.className = 'hint';
+  meta.textContent = parts.join(' · ');
+}
+
+function loadSelectedProfileIntoForm() {
+  ensureSelectedProfile();
+  renderProfileSelect();
+  const profile = getSelectedProfile();
+  if (!profile) return;
+  document.getElementById('cfg-profile-name').value = profile.name || '';
+  document.getElementById('cfg-broker').value = profile.config.tunnel.broker || 'custom';
+  document.getElementById('cfg-remote-endpoint').value = profile.config.tunnel.remote_endpoint || '';
+  document.getElementById('cfg-local-ipv6').value = profile.config.tunnel.local_ipv6 || '';
+  document.getElementById('cfg-remote-ipv6').value = profile.config.tunnel.remote_ipv6 || '';
+  document.getElementById('cfg-ttl').value = profile.config.tunnel.ttl || 255;
+  document.getElementById('cfg-mtu').value = profile.config.tunnel.mtu > 0 ? profile.config.tunnel.mtu : '';
+  currentConfiguredMTU = profile.config.tunnel.mtu || 0;
+  document.getElementById('cfg-lan-enabled').checked = !!profile.config.lan.enabled;
+  document.getElementById('cfg-mode').value = profile.config.lan.mode || 'slaac';
+  document.getElementById('networks-list').innerHTML = '';
+  (profile.config.lan.networks || []).forEach(network => addNetwork(network.interface, network.prefix, network.comment));
+  currentAutoDNSValues = deriveAutoDNSValues(profile.config.lan.networks || []);
+  isUsingAutoDNS = !profile.config.lan.dns || profile.config.lan.dns.length === 0;
+  isDNSManuallyEdited = false;
+  document.getElementById('cfg-dns').value = isUsingAutoDNS ? currentAutoDNSValues.join(', ') : (profile.config.lan.dns || []).join(', ');
+  document.getElementById('cfg-health-enabled').checked = !!profile.config.health.enabled;
+  document.getElementById('cfg-health-interval').value = profile.config.health.interval_sec || 30;
+  document.getElementById('cfg-health-target').value = profile.config.health.target || '';
+  document.getElementById('cfg-auto-restart').checked = !!profile.config.health.auto_restart;
+  currentTunnelEnabled = !!configDocument.tunnel_enabled;
+  currentServerPort = configDocument.server.port || 9086;
+  document.getElementById('cfg-wan-iface').value = configDocument.server.wan_interface || 'ppp0';
+  document.getElementById('cfg-token').value = configDocument.server.auth_token || '';
+  renderBrokerHint();
+  renderProfileMeta();
+  if (lastStatus) document.getElementById('st-mtu').textContent = formatEffectiveMTU(lastStatus.effective_mtu);
+}
+
+function syncSelectedProfileFromForm() {
+  const profile = getSelectedProfile();
+  if (!profile) return;
+  const networks = collectNetworks();
+  const dnsValue = isUsingAutoDNS && !isDNSManuallyEdited ? [] : parseConfiguredDNS(document.getElementById('cfg-dns').value);
+  profile.name = document.getElementById('cfg-profile-name').value.trim();
+  profile.config.tunnel = {
+    broker: document.getElementById('cfg-broker').value,
+    remote_endpoint: document.getElementById('cfg-remote-endpoint').value.trim(),
+    local_ipv6: document.getElementById('cfg-local-ipv6').value.trim(),
+    remote_ipv6: document.getElementById('cfg-remote-ipv6').value.trim(),
+    ttl: parseInt(document.getElementById('cfg-ttl').value, 10) || 255,
+    mtu: parseOptionalNumber(document.getElementById('cfg-mtu').value)
+  };
+  profile.config.lan = {
+    enabled: document.getElementById('cfg-lan-enabled').checked,
+    dns: dnsValue,
+    mode: document.getElementById('cfg-mode').value,
+    networks: networks
+  };
+  profile.config.health = {
+    enabled: document.getElementById('cfg-health-enabled').checked,
+    interval_sec: parseInt(document.getElementById('cfg-health-interval').value, 10) || 30,
+    target: document.getElementById('cfg-health-target').value.trim(),
+    auto_restart: document.getElementById('cfg-auto-restart').checked
+  };
+  configDocument.tunnel_enabled = currentTunnelEnabled;
+  configDocument.server = {
+    port: currentServerPort,
+    wan_interface: document.getElementById('cfg-wan-iface').value.trim(),
+    auth_token: document.getElementById('cfg-token').value
+  };
+  currentConfiguredMTU = profile.config.tunnel.mtu || 0;
+}
+
+function buildRequestDocument() {
+  syncSelectedProfileFromForm();
+  return {
+    storage_format: configDocument.storage_format || 'profiles',
+    tunnel_enabled: !!configDocument.tunnel_enabled,
+    active_profile_id: configDocument.active_profile_id,
+    profiles: (configDocument.profiles || []).map(profile => ({
+      id: profile.id,
+      name: profile.name,
+      config: {
+        tunnel: {
+          broker: profile.config.tunnel.broker || 'custom',
+          remote_endpoint: profile.config.tunnel.remote_endpoint || '',
+          local_ipv6: profile.config.tunnel.local_ipv6 || '',
+          remote_ipv6: profile.config.tunnel.remote_ipv6 || '',
+          ttl: profile.config.tunnel.ttl || 255,
+          mtu: profile.config.tunnel.mtu || 0
+        },
+        lan: {
+          enabled: !!profile.config.lan.enabled,
+          dns: profile.config.lan.dns || [],
+          mode: profile.config.lan.mode || 'slaac',
+          networks: profile.config.lan.networks || []
+        },
+        health: {
+          enabled: !!profile.config.health.enabled,
+          interval_sec: profile.config.health.interval_sec || 30,
+          target: profile.config.health.target || '',
+          auto_restart: !!profile.config.health.auto_restart
+        }
+      }
+    })),
+    server: {
+      port: configDocument.server.port || 9086,
+      wan_interface: configDocument.server.wan_interface || 'ppp0',
+      auth_token: configDocument.server.auth_token || ''
+    }
+  };
+}
+
+function createEmptyProfile(name) {
+  const uniqueName = makeUniqueProfileName(name);
+  const profileId = makeUniqueProfileId(slugifyProfileId(uniqueName));
+  return {
+    id: profileId,
+    name: uniqueName,
+    config: {
+      tunnel: {
+        broker: 'custom',
+        remote_endpoint: '',
+        local_ipv6: '',
+        remote_ipv6: '',
+        ttl: 255,
+        mtu: 0
+      },
+      lan: {
+        enabled: false,
+        dns: [],
+        mode: 'slaac',
+        networks: []
+      },
+      health: {
+        enabled: true,
+        interval_sec: 30,
+        target: '2001:4860:4860::8888',
+        auto_restart: true
+      }
+    }
+  };
+}
+
+function createProfile() {
+  syncSelectedProfileFromForm();
+  const profile = createEmptyProfile('New Profile');
+  configDocument.profiles.push(profile);
+  selectedProfileId = profile.id;
+  loadSelectedProfileIntoForm();
+}
+
+function duplicateProfile() {
+  const profile = getSelectedProfile();
+  if (!profile) return;
+  syncSelectedProfileFromForm();
+  const duplicate = deepClone(profile);
+  duplicate.name = makeUniqueProfileName((profile.name || 'Profile') + ' Copy');
+  duplicate.id = makeUniqueProfileId(slugifyProfileId(duplicate.name));
+  delete duplicate.is_valid;
+  delete duplicate.validation_errors;
+  configDocument.profiles.push(duplicate);
+  selectedProfileId = duplicate.id;
+  loadSelectedProfileIntoForm();
+}
+
+function renameProfile() {
+  const profile = getSelectedProfile();
+  if (!profile) return;
+  const nextName = prompt('Profile name:', profile.name || '');
+  if (!nextName) return;
+  const trimmedName = nextName.trim();
+  if (!trimmedName) return;
+  profile.name = trimmedName;
+  document.getElementById('cfg-profile-name').value = trimmedName;
+  renderProfileSelect();
+  renderProfileMeta();
+}
+
+function deleteProfile() {
+  const profile = getSelectedProfile();
+  if (!profile) return;
+  if ((configDocument.profiles || []).length <= 1) {
+    toast('Cannot delete the last profile', false);
+    return;
+  }
+  if (!confirm('Delete profile "' + profile.name + '"?')) return;
+  configDocument.profiles = configDocument.profiles.filter(candidate => candidate.id !== profile.id);
+  if (configDocument.active_profile_id === profile.id) {
+    configDocument.active_profile_id = configDocument.profiles[0].id;
+  }
+  selectedProfileId = configDocument.active_profile_id || configDocument.profiles[0].id;
+  loadSelectedProfileIntoForm();
+}
+
+async function activateProfile() {
+  const profile = getSelectedProfile();
+  if (!profile) return;
+  const previousActiveProfileId = configDocument.active_profile_id;
+  configDocument.active_profile_id = profile.id;
+  try {
+    await saveDocument('Profile activated');
+  } catch (e) {
+    configDocument.active_profile_id = previousActiveProfileId;
+  }
+}
+
 function parseConfiguredDNS(value) {
   return value.split(',').map(s => s.trim()).filter(Boolean);
 }
@@ -439,84 +820,38 @@ function refreshAutoDNSField() {
 
 async function loadConfig() {
   try {
-    const cfg = await api('GET', '/api/config');
-    document.getElementById('cfg-broker').value = cfg.tunnel.broker || 'he';
-    document.getElementById('cfg-remote-endpoint').value = cfg.tunnel.remote_endpoint || '';
-    document.getElementById('cfg-local-ipv6').value = cfg.tunnel.local_ipv6 || '';
-    document.getElementById('cfg-remote-ipv6').value = cfg.tunnel.remote_ipv6 || '';
-    document.getElementById('cfg-ttl').value = cfg.tunnel.ttl || 255;
-    document.getElementById('cfg-mtu').value = cfg.tunnel.mtu > 0 ? cfg.tunnel.mtu : '';
-    currentConfiguredMTU = cfg.tunnel.mtu || 0;
-    document.getElementById('cfg-lan-enabled').checked = cfg.lan.enabled;
-    document.getElementById('cfg-mode').value = cfg.lan.mode || 'slaac';
-    document.getElementById('networks-list').innerHTML = '';
-    (cfg.lan.networks || []).forEach(n => addNetwork(n.interface, n.prefix, n.comment));
-    currentAutoDNSValues = deriveAutoDNSValues(cfg.lan.networks || []);
-    isUsingAutoDNS = !cfg.lan.dns || cfg.lan.dns.length === 0;
-    isDNSManuallyEdited = false;
-    document.getElementById('cfg-dns').value = isUsingAutoDNS ? currentAutoDNSValues.join(', ') : (cfg.lan.dns || []).join(', ');
-    document.getElementById('cfg-health-enabled').checked = cfg.health.enabled;
-    document.getElementById('cfg-health-interval').value = cfg.health.interval_sec || 30;
-    document.getElementById('cfg-health-target').value = cfg.health.target || '';
-    document.getElementById('cfg-auto-restart').checked = cfg.health.auto_restart;
-    currentTunnelEnabled = !!cfg.tunnel.enabled;
-    currentServerPort = cfg.server.port || 9086;
-    document.getElementById('cfg-wan-iface').value = cfg.server.wan_interface || 'ppp0';
-    document.getElementById('cfg-token').value = cfg.server.auth_token || '';
-    if (lastStatus) {
-      document.getElementById('st-mtu').textContent = formatEffectiveMTU(lastStatus.effective_mtu);
-    }
+    configDocument = await api('GET', '/api/config');
+    selectedProfileId = configDocument.active_profile_id || ((configDocument.profiles || [])[0] || {}).id || '';
+    loadSelectedProfileIntoForm();
   } catch (e) {
     console.error('load config:', e);
   }
 }
 
-async function saveConfig(e) {
-  e.preventDefault();
-  const networks = collectNetworks();
-  const dnsValue = isUsingAutoDNS && !isDNSManuallyEdited
-    ? []
-    : parseConfiguredDNS(document.getElementById('cfg-dns').value);
-  const cfg = {
-    tunnel: {
-      enabled: currentTunnelEnabled,
-      broker: document.getElementById('cfg-broker').value,
-      remote_endpoint: document.getElementById('cfg-remote-endpoint').value,
-      local_ipv6: document.getElementById('cfg-local-ipv6').value,
-      remote_ipv6: document.getElementById('cfg-remote-ipv6').value,
-      ttl: parseInt(document.getElementById('cfg-ttl').value),
-      mtu: parseOptionalNumber(document.getElementById('cfg-mtu').value)
-    },
-    lan: {
-      enabled: document.getElementById('cfg-lan-enabled').checked,
-      dns: dnsValue,
-      mode: document.getElementById('cfg-mode').value,
-      networks: networks
-    },
-    health: {
-      enabled: document.getElementById('cfg-health-enabled').checked,
-      interval_sec: parseInt(document.getElementById('cfg-health-interval').value),
-      target: document.getElementById('cfg-health-target').value,
-      auto_restart: document.getElementById('cfg-auto-restart').checked
-    },
-    server: {
-      port: currentServerPort,
-      wan_interface: document.getElementById('cfg-wan-iface').value,
-      auth_token: document.getElementById('cfg-token').value
-    }
-  };
-  currentConfiguredMTU = cfg.tunnel.mtu || 0;
+async function saveDocument(successMessage, shouldReloadConfig = true) {
+  const requestDocument = buildRequestDocument();
   try {
-    await api('PUT', '/api/config', cfg);
-    toast('Config saved & reconciled', true);
-    if (cfg.server.auth_token !== authToken) {
-      authToken = cfg.server.auth_token;
+    await api('PUT', '/api/config', requestDocument);
+    configDocument = requestDocument;
+    toast(successMessage, true);
+    if (requestDocument.server.auth_token !== authToken) {
+      authToken = requestDocument.server.auth_token;
       localStorage.setItem('ipv6tunnel_token', authToken);
     }
-    setTimeout(refreshStatus, 2000);
+    setTimeout(async () => {
+      await refreshStatus();
+      if (shouldReloadConfig) await loadConfig();
+    }, 1200);
   } catch (e) {
     toast('Error: ' + e.message, false);
+    if (shouldReloadConfig) await loadConfig();
+    throw e;
   }
+}
+
+async function saveConfig(e) {
+  e.preventDefault();
+  await saveDocument('Config saved & reconciled');
 }
 
 function parseOptionalNumber(value) {
@@ -529,6 +864,19 @@ function parseOptionalNumber(value) {
 document.getElementById('cfg-dns').addEventListener('input', () => {
   isDNSManuallyEdited = true;
   isUsingAutoDNS = false;
+});
+document.getElementById('cfg-broker').addEventListener('change', renderBrokerHint);
+document.getElementById('cfg-profile-select').addEventListener('change', event => {
+  syncSelectedProfileFromForm();
+  selectedProfileId = event.target.value;
+  loadSelectedProfileIntoForm();
+});
+document.getElementById('cfg-profile-name').addEventListener('input', () => {
+  const profile = getSelectedProfile();
+  if (!profile) return;
+  profile.name = document.getElementById('cfg-profile-name').value;
+  renderProfileSelect();
+  renderProfileMeta();
 });
 
 refreshStatus().then(() => loadConfig());
