@@ -498,7 +498,23 @@ function formatPingTimestamp(value) {
   if (!value) return 'Last ping: never';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return 'Last ping: -';
-  return 'Last ping: ' + date.toLocaleString();
+  return 'Last ping: ' + formatLocalDateTime(date);
+}
+
+function formatLocalDateTime(date) {
+  return [
+    date.getFullYear(),
+    padDatePart(date.getMonth() + 1),
+    padDatePart(date.getDate())
+  ].join('-') + ' ' + [
+    padDatePart(date.getHours()),
+    padDatePart(date.getMinutes()),
+    padDatePart(date.getSeconds())
+  ].join(':');
+}
+
+function padDatePart(value) {
+  return String(value).padStart(2, '0');
 }
 
 function getActiveProfileForPing() {
