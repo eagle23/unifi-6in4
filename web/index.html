@@ -46,6 +46,24 @@
     font-family: monospace; font-size: 14px; text-align: right;
     flex: 1; min-width: 0; overflow-wrap: anywhere;
   }
+  .status-value-ping {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+  }
+  .ping-content {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    min-width: 0;
+  }
+  .status-subvalue {
+    color: var(--text-dim);
+    font-size: 12px;
+    font-family: inherit;
+  }
   .badge {
     display: inline-block; padding: 2px 10px; border-radius: 12px;
     font-size: 12px; font-weight: 600;
@@ -153,6 +171,12 @@
     .status-row { align-items: flex-start; }
     .status-label { flex-basis: auto; }
     .status-value { text-align: left; }
+    .status-value-ping {
+      width: 100%;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+    .ping-content { align-items: flex-start; }
   }
 </style>
 </head>
@@ -198,7 +222,13 @@
     </div>
     <div class="status-row">
       <span class="status-label">Ping</span>
-      <span class="status-value" id="st-ping">-</span>
+      <div class="status-value status-value-ping">
+        <span id="st-ping-info" class="ping-content">
+          <span id="st-ping-result">-</span>
+          <span id="st-ping-meta" class="status-subvalue">Last ping: never</span>
+        </span>
+        <button id="btn-ping-now" type="button" class="btn-secondary btn-sm" onclick="probePing()">Ping now</button>
+      </div>
     </div>
     <div class="status-row">
       <span class="status-label">Last Error</span>
@@ -345,6 +375,7 @@ let currentAutoDNSValues = [];
 let isUsingAutoDNS = false;
 let isDNSManuallyEdited = false;
 let selectedProfileId = '';
+let isPingInFlight = false;
 
 const brokerPresets = {
   he: {
@@ -412,36 +443,7 @@ function toast(msg, ok) {
 
 async function refreshStatus() {
   try {
-    const st = await api('GET', '/api/status');
-    lastStatus = st;
-    currentTunnelEnabled = !!st.desired_enabled;
-    const badge = document.getElementById('st-badge');
-    badge.textContent = st.tunnel_up ? 'UP' : 'DOWN';
-    badge.className = 'badge ' + (st.tunnel_up ? 'badge-up' : 'badge-down');
-    document.getElementById('st-desired').textContent = st.desired_enabled ? 'enabled' : 'disabled';
-    document.getElementById('st-profile').textContent = st.active_profile_name || st.active_profile_id || '-';
-    document.getElementById('st-broker').textContent = st.active_broker || '-';
-    document.getElementById('st-iface').textContent = st.interface || '-';
-    document.getElementById('st-wan').textContent = st.wan_ipv4 || '-';
-    document.getElementById('st-ipv6').textContent = st.local_ipv6 || '-';
-    document.getElementById('st-mtu').textContent = formatEffectiveMTU(st.effective_mtu);
-    document.getElementById('st-error').textContent = st.last_error || '-';
-    if (st.ping_ok) {
-      document.getElementById('st-ping').innerHTML =
-        '<span style="color:var(--green)">' + st.ping_ms + 'ms</span>';
-    } else {
-      document.getElementById('st-ping').innerHTML =
-        st.tunnel_up ? '<span style="color:var(--red)">failed</span>' : '-';
-    }
-    const nw = document.getElementById('st-networks');
-    if (st.networks && st.networks.length > 0) {
-      nw.innerHTML = st.networks.map(n =>
-        '<div class="status-row"><span class="status-label">' + esc(n.interface) +
-        '</span><span class="status-value">' + esc(n.prefix) + '</span></div>'
-      ).join('');
-    } else {
-      nw.innerHTML = '';
-    }
+    renderStatus(await api('GET', '/api/status'));
   } catch (e) {
     console.error('status:', e);
   }
@@ -450,6 +452,73 @@ async function refreshStatus() {
 function formatEffectiveMTU(effectiveMTU) {
   if (!effectiveMTU) return '-';
   return currentConfiguredMTU > 0 ? effectiveMTU + ' (manual)' : effectiveMTU + ' (auto)';
+}
+
+function renderStatus(st) {
+  lastStatus = st;
+  currentTunnelEnabled = !!st.desired_enabled;
+  const badge = document.getElementById('st-badge');
+  badge.textContent = st.tunnel_up ? 'UP' : 'DOWN';
+  badge.className = 'badge ' + (st.tunnel_up ? 'badge-up' : 'badge-down');
+  document.getElementById('st-desired').textContent = st.desired_enabled ? 'enabled' : 'disabled';
+  document.getElementById('st-profile').textContent = st.active_profile_name || st.active_profile_id || '-';
+  document.getElementById('st-broker').textContent = st.active_broker || '-';
+  document.getElementById('st-iface').textContent = st.interface || '-';
+  document.getElementById('st-wan').textContent = st.wan_ipv4 || '-';
+  document.getElementById('st-ipv6').textContent = st.local_ipv6 || '-';
+  document.getElementById('st-mtu').textContent = formatEffectiveMTU(st.effective_mtu);
+  document.getElementById('st-error').textContent = st.last_error || '-';
+  renderPingStatus(st);
+  updatePingButtonState();
+  const nw = document.getElementById('st-networks');
+  if (st.networks && st.networks.length > 0) {
+    nw.innerHTML = st.networks.map(n =>
+      '<div class="status-row"><span class="status-label">' + esc(n.interface) +
+      '</span><span class="status-value">' + esc(n.prefix) + '</span></div>'
+    ).join('');
+    return;
+  }
+  nw.innerHTML = '';
+}
+
+function renderPingStatus(st) {
+  const pingResult = document.getElementById('st-ping-result');
+  const pingMeta = document.getElementById('st-ping-meta');
+  if (st.ping_ok) {
+    pingResult.innerHTML = '<span style="color:var(--green)">' + st.ping_ms + 'ms</span>';
+  } else if (st.last_ping_at) {
+    pingResult.innerHTML = '<span style="color:var(--red)">failed</span>';
+  } else {
+    pingResult.textContent = '-';
+  }
+  pingMeta.textContent = formatPingTimestamp(st.last_ping_at);
+}
+
+function formatPingTimestamp(value) {
+  if (!value) return 'Last ping: never';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Last ping: -';
+  return 'Last ping: ' + date.toLocaleString();
+}
+
+function getActiveProfileForPing() {
+  if (!configDocument || !Array.isArray(configDocument.profiles)) return null;
+  const activeProfileId = configDocument.active_profile_id || (lastStatus && lastStatus.active_profile_id) || '';
+  return configDocument.profiles.find(profile => profile.id === activeProfileId) || null;
+}
+
+function canRunManualPing() {
+  const profile = getActiveProfileForPing();
+  if (!profile || !profile.config || !profile.config.health) return false;
+  return !!profile.config.health.enabled && !!String(profile.config.health.target || '').trim();
+}
+
+function updatePingButtonState() {
+  const button = document.getElementById('btn-ping-now');
+  const canPing = canRunManualPing();
+  button.disabled = isPingInFlight || !canPing;
+  button.textContent = isPingInFlight ? 'Pinging...' : 'Ping now';
+  button.title = canPing ? '' : 'Enable health monitoring and set Ping Target';
 }
 
 async function tunnelAction(action) {
@@ -462,6 +531,22 @@ async function tunnelAction(action) {
     toast('Error: ' + e.message, false);
   } finally {
     document.querySelectorAll('.controls button').forEach(b => b.disabled = false);
+  }
+}
+
+async function probePing() {
+  if (isPingInFlight) return;
+  isPingInFlight = true;
+  updatePingButtonState();
+  try {
+    const status = await api('GET', '/api/health');
+    renderStatus(status);
+    toast(status.ping_ok ? 'Ping OK' : 'Ping failed', status.ping_ok);
+  } catch (e) {
+    toast('Error: ' + e.message, false);
+  } finally {
+    isPingInFlight = false;
+    updatePingButtonState();
   }
 }
 
@@ -602,6 +687,7 @@ function loadSelectedProfileIntoForm() {
   renderBrokerHint();
   renderProfileMeta();
   if (lastStatus) document.getElementById('st-mtu').textContent = formatEffectiveMTU(lastStatus.effective_mtu);
+  updatePingButtonState();
 }
 
 function syncSelectedProfileFromForm() {

@@ -135,6 +135,9 @@ func TestServiceValidConfigTransitionsToReady(t *testing.T) {
 	if !status.PingOK {
 		t.Error("PingOK = false, want true")
 	}
+	if status.LastPingAt.IsZero() {
+		t.Error("LastPingAt is zero, want probe timestamp")
+	}
 	if len(backend.reconcileCalls) == 0 {
 		t.Fatal("expected at least one reconcile call")
 	}

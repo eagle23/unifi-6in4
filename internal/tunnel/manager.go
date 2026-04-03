@@ -44,6 +44,7 @@ type Status struct {
 	Networks          []NetworkStatus `json:"networks"`
 	PingOK            bool            `json:"ping_ok"`
 	PingMs            int             `json:"ping_ms"`
+	LastPingAt        time.Time       `json:"last_ping_at"`
 	ConfigValid       bool            `json:"config_valid"`
 	DesiredEnabled    bool            `json:"desired_enabled"`
 	ReconcileState    string          `json:"reconcile_state"`

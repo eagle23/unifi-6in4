@@ -237,9 +237,11 @@ func (s *Service) runHealthCheck(allowAutoRestart bool) (*tunnel.Status, error) 
 	if err != nil {
 		return nil, err
 	}
+	probeTime := time.Now().UTC()
 	s.mu.Lock()
 	s.state.PingOK = result.PingOK
 	s.state.PingMs = result.PingMs
+	s.state.LastPingAt = probeTime
 	if result.PingOK {
 		s.removeDegradedReasonLocked(tunnel.ReasonHealthProbeFailed)
 	} else if !containsString(s.state.DegradedReasons, tunnel.ReasonHealthProbeFailed) && cfg.Tunnel.Enabled {
@@ -298,8 +300,13 @@ func (s *Service) reconcileLocked(force bool) error {
 	}
 	observation, observeErr := s.backend.Observe(ObserveInput{WANInterface: cfg.Server.WANInterface})
 	probeResult := ProbeResult{}
+	probeTime := time.Time{}
 	if len(validationReasons) == 0 && cfg.Tunnel.Enabled && cfg.Health.Enabled && cfg.Health.Target != "" {
-		probeResult, _ = s.backend.Probe(cfg.Health.Target)
+		result, err := s.backend.Probe(cfg.Health.Target)
+		if err == nil {
+			probeResult = result
+			probeTime = time.Now().UTC()
+		}
 	}
 	s.state.WANIPv4 = observation.WANIPv4
 	s.state.LocalIPv6 = cfg.Tunnel.LocalIPv6
@@ -311,6 +318,9 @@ func (s *Service) reconcileLocked(force bool) error {
 	s.state.TunnelUp = observation.TunnelUp
 	s.state.PingOK = probeResult.PingOK
 	s.state.PingMs = probeResult.PingMs
+	if !probeTime.IsZero() {
+		s.state.LastPingAt = probeTime
+	}
 	s.state.DegradedReasons = validationReasons
 	appendErrorReason(&s.state.DegradedReasons, backendErr)
 	appendErrorReason(&s.state.DegradedReasons, advertiserErr)

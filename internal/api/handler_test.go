@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/eagle23/unifi-tunnel-4to6/internal/api"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/config"
@@ -95,8 +96,9 @@ func TestHandleGetStatus(t *testing.T) {
 }
 
 func TestHandleGetHealth(t *testing.T) {
+	expectedLastPingAt := time.Date(2026, time.April, 3, 17, 19, 19, 0, time.UTC)
 	controller := &mockController{
-		health:   &tunnel.Status{PingOK: true, PingMs: 9},
+		health:   &tunnel.Status{PingOK: true, PingMs: 9, LastPingAt: expectedLastPingAt},
 		document: config.DefaultDocument(),
 	}
 	handler := api.NewHandler(controller)
@@ -112,6 +114,9 @@ func TestHandleGetHealth(t *testing.T) {
 	}
 	if status.PingMs != 9 {
 		t.Errorf("PingMs = %d, want 9", status.PingMs)
+	}
+	if !status.LastPingAt.Equal(expectedLastPingAt) {
+		t.Errorf("LastPingAt = %s, want %s", status.LastPingAt, expectedLastPingAt)
 	}
 }
 
