@@ -11,12 +11,14 @@ import (
 
 type fakeBackend struct {
 	reconcileCalls []ReconcileInput
+	repairCalls    []RepairInput
 	observation    Observation
 	probeResult    ProbeResult
 	reconcileErr   error
 	reconcileErrs  []error
 	observeErr     error
 	probeErr       error
+	repairErr      error
 }
 
 func (f *fakeBackend) Reconcile(input ReconcileInput) error {
@@ -29,11 +31,20 @@ func (f *fakeBackend) Reconcile(input ReconcileInput) error {
 }
 
 func (f *fakeBackend) Observe(input ObserveInput) (*Observation, error) {
-	return &f.observation, f.observeErr
+	observation := f.observation
+	return &observation, f.observeErr
 }
 
 func (f *fakeBackend) Probe(target string) (ProbeResult, error) {
 	return f.probeResult, f.probeErr
+}
+
+func (f *fakeBackend) RepairAddresses(input RepairInput) error {
+	f.repairCalls = append(f.repairCalls, input)
+	if f.repairErr == nil {
+		f.observation.MissingIPv6Addresses = nil
+	}
+	return f.repairErr
 }
 
 func TestServiceStartWithBlankConfigKeepsDataplaneDown(t *testing.T) {
@@ -143,6 +154,186 @@ func TestServiceValidConfigTransitionsToReady(t *testing.T) {
 	}
 	if !backend.reconcileCalls[len(backend.reconcileCalls)-1].Config.Tunnel.Enabled {
 		t.Error("last reconcile did not enable tunnel")
+	}
+}
+
+func TestServiceMarksMissingManagedIPv6AddressDegraded(t *testing.T) {
+	dir := t.TempDir()
+	configPath := dir + "/config.json"
+	statePath := dir + "/state.json"
+	cfg := config.Defaults()
+	cfg.Tunnel.Enabled = true
+	cfg.Tunnel.RemoteEndpoint = "216.66.88.98"
+	cfg.Tunnel.LocalIPv6 = "2001:470::2/64"
+	cfg.Health.Enabled = false
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	backend := &fakeBackend{
+		observation: Observation{
+			TunnelUp:             true,
+			WANIPv4:              "78.36.199.233",
+			MissingIPv6Addresses: []string{"br0 missing 2001:470:1f0e:abc::1/64"},
+		},
+	}
+	service, err := NewService(ServiceParams{
+		ConfigPath: configPath,
+		StatePath:  statePath,
+		Backend:    backend,
+	})
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	defer service.Stop()
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	status, err := service.Status()
+	if err != nil {
+		t.Fatalf("Status() error: %v", err)
+	}
+	expectedReason := "managed IPv6 address missing: br0 missing 2001:470:1f0e:abc::1/64"
+	if status.ReconcileState != "degraded" {
+		t.Fatalf("ReconcileState = %q, want degraded", status.ReconcileState)
+	}
+	if !containsString(status.DegradedReasons, expectedReason) {
+		t.Fatalf("DegradedReasons = %v, want %q", status.DegradedReasons, expectedReason)
+	}
+}
+
+func TestServiceHealthRepairsMissingManagedIPv6AddressWhenProbeOK(t *testing.T) {
+	dir := t.TempDir()
+	configPath := dir + "/config.json"
+	statePath := dir + "/state.json"
+	cfg := config.Defaults()
+	cfg.Tunnel.Enabled = true
+	cfg.Tunnel.RemoteEndpoint = "216.66.88.98"
+	cfg.Tunnel.LocalIPv6 = "2001:470::2/64"
+	cfg.Health.Enabled = true
+	cfg.Health.AutoRestart = true
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	backend := &fakeBackend{
+		observation: Observation{
+			TunnelUp:             true,
+			WANIPv4:              "78.36.199.233",
+			MissingIPv6Addresses: []string{"sit-6in4 missing 2001:470::2/64"},
+		},
+		probeResult: ProbeResult{PingOK: true, PingMs: 42},
+	}
+	service, err := NewService(ServiceParams{
+		ConfigPath: configPath,
+		StatePath:  statePath,
+		Backend:    backend,
+	})
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	defer service.Stop()
+	service.state.ReconcileState = "ready"
+	baselineReconcile := len(backend.reconcileCalls)
+	baselineRepair := len(backend.repairCalls)
+	if _, err := service.runHealthCheck(true); err != nil {
+		t.Fatalf("runHealthCheck() error: %v", err)
+	}
+	if gotDelta := len(backend.reconcileCalls) - baselineReconcile; gotDelta != 0 {
+		t.Fatalf("reconcileCalls delta = %d, want 0", gotDelta)
+	}
+	if gotDelta := len(backend.repairCalls) - baselineRepair; gotDelta != 1 {
+		t.Fatalf("repairCalls delta = %d, want 1", gotDelta)
+	}
+	if backend.repairCalls[len(backend.repairCalls)-1].Config == nil {
+		t.Fatal("repair call missing Config")
+	}
+}
+
+func TestServiceHealthFallsBackToReconcileWhenRepairFails(t *testing.T) {
+	dir := t.TempDir()
+	configPath := dir + "/config.json"
+	statePath := dir + "/state.json"
+	cfg := config.Defaults()
+	cfg.Tunnel.Enabled = true
+	cfg.Tunnel.RemoteEndpoint = "216.66.88.98"
+	cfg.Tunnel.LocalIPv6 = "2001:470::2/64"
+	cfg.Health.Enabled = true
+	cfg.Health.AutoRestart = true
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	backend := &fakeBackend{
+		observation: Observation{
+			TunnelUp:             true,
+			WANIPv4:              "78.36.199.233",
+			MissingIPv6Addresses: []string{"sit-6in4 missing 2001:470::2/64"},
+		},
+		probeResult: ProbeResult{PingOK: true, PingMs: 42},
+		repairErr:   errors.New("repair boom"),
+	}
+	service, err := NewService(ServiceParams{
+		ConfigPath: configPath,
+		StatePath:  statePath,
+		Backend:    backend,
+	})
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	defer service.Stop()
+	service.state.ReconcileState = "ready"
+	baselineReconcile := len(backend.reconcileCalls)
+	baselineRepair := len(backend.repairCalls)
+	if _, err := service.runHealthCheck(true); err != nil {
+		t.Fatalf("runHealthCheck() error: %v", err)
+	}
+	if gotDelta := len(backend.repairCalls) - baselineRepair; gotDelta != 1 {
+		t.Fatalf("repairCalls delta = %d, want 1", gotDelta)
+	}
+	if gotDelta := len(backend.reconcileCalls) - baselineReconcile; gotDelta != 1 {
+		t.Fatalf("reconcileCalls delta = %d, want 1 (fallback)", gotDelta)
+	}
+}
+
+func TestServiceHealthFullReconcilesWhenProbeFails(t *testing.T) {
+	dir := t.TempDir()
+	configPath := dir + "/config.json"
+	statePath := dir + "/state.json"
+	cfg := config.Defaults()
+	cfg.Tunnel.Enabled = true
+	cfg.Tunnel.RemoteEndpoint = "216.66.88.98"
+	cfg.Tunnel.LocalIPv6 = "2001:470::2/64"
+	cfg.Health.Enabled = true
+	cfg.Health.AutoRestart = true
+	cfg.Health.Target = "2001:4860:4860::8888"
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	backend := &fakeBackend{
+		observation: Observation{
+			TunnelUp: true,
+			WANIPv4:  "78.36.199.233",
+		},
+		probeResult: ProbeResult{PingOK: false},
+	}
+	service, err := NewService(ServiceParams{
+		ConfigPath: configPath,
+		StatePath:  statePath,
+		Backend:    backend,
+	})
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	defer service.Stop()
+	service.state.ReconcileState = "ready"
+	baselineReconcile := len(backend.reconcileCalls)
+	baselineRepair := len(backend.repairCalls)
+	if _, err := service.runHealthCheck(true); err != nil {
+		t.Fatalf("runHealthCheck() error: %v", err)
+	}
+	if gotDelta := len(backend.repairCalls) - baselineRepair; gotDelta != 0 {
+		t.Fatalf("repairCalls delta = %d, want 0", gotDelta)
+	}
+	if gotDelta := len(backend.reconcileCalls) - baselineReconcile; gotDelta != 1 {
+		t.Fatalf("reconcileCalls delta = %d, want 1", gotDelta)
 	}
 }
 

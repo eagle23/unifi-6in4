@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/eagle23/unifi-tunnel-4to6/internal/api"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/control"
+	"github.com/eagle23/unifi-tunnel-4to6/internal/logging"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/tunnel"
 	webui "github.com/eagle23/unifi-tunnel-4to6/web"
 )
@@ -37,16 +39,22 @@ func runServe(args []string) {
 		*configPath = filepath.Join(baseDir, "config.json")
 	}
 	statePath := filepath.Join(baseDir, "state.json")
+	if err := logging.Init(filepath.Dir(*configPath)); err != nil {
+		log.Fatalf("init logging: %v", err)
+	}
+	defer logging.Close()
+	slog.Info("daemon starting", "config", *configPath, "log_file", logging.Path())
 	service, err := control.NewService(control.ServiceParams{
 		ConfigPath: *configPath,
 		StatePath:  statePath,
 		Backend:    control.NewSystemBackend(),
 	})
 	if err != nil {
-		log.Fatalf("create control service: %v", err)
+		slog.Error("create control service failed", "error", err)
+		os.Exit(1)
 	}
 	if err := service.Start(); err != nil {
-		log.Printf("initial reconcile failed: %v", err)
+		slog.Warn("initial reconcile failed", "error", err)
 	}
 	defer service.Stop()
 	handler := api.NewHandler(service)
@@ -55,7 +63,8 @@ func runServe(args []string) {
 	controlHandler := api.NewControlServer(handler)
 	controlListener, err := listenUnixSocket(controlSocketPath)
 	if err != nil {
-		log.Fatalf("listen control socket: %v", err)
+		slog.Error("listen control socket failed", "error", err)
+		os.Exit(1)
 	}
 	defer func() {
 		_ = controlListener.Close()
@@ -63,13 +72,15 @@ func runServe(args []string) {
 	}()
 	go func() {
 		if serveErr := http.Serve(controlListener, controlHandler); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			log.Printf("control socket server failed: %v", serveErr)
+			slog.Error("control socket server failed", "error", serveErr)
 		}
 	}()
 	addr := fmt.Sprintf("0.0.0.0:%d", service.GetConfig().Server.Port)
-	log.Printf("listening on %s", addr)
-	log.Printf("control socket listening on %s", controlSocketPath)
-	log.Fatal(http.ListenAndServe(addr, server))
+	slog.Info("HTTP server listening", "addr", addr, "control_socket", controlSocketPath)
+	if err := http.ListenAndServe(addr, server); err != nil {
+		slog.Error("HTTP server stopped", "error", err)
+		os.Exit(1)
+	}
 }
 
 func runCtl(args []string) {

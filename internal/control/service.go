@@ -3,8 +3,10 @@ package control
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +14,8 @@ import (
 	"github.com/eagle23/unifi-tunnel-4to6/internal/ra"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/tunnel"
 )
+
+const managedIPv6AddressMissingReasonPrefix = "managed IPv6 address missing: "
 
 // ServiceParams holds construction parameters for the control service.
 type ServiceParams struct {
@@ -230,38 +234,118 @@ func (s *Service) runHealthCheck(allowAutoRestart bool) (*tunnel.Status, error) 
 	s.mu.Lock()
 	cfg := s.config.Clone()
 	s.mu.Unlock()
-	if !cfg.Health.Enabled || cfg.Health.Target == "" {
-		return s.Status()
+	validationErr := cfg.Validate()
+	validationReasons := validationReasons(validationErr)
+	observation, observeErr := s.backend.Observe(buildObserveInput(cfg, validationReasons))
+	if observation == nil {
+		observation = &Observation{}
 	}
-	result, err := s.backend.Probe(cfg.Health.Target)
-	if err != nil {
-		return nil, err
+	result := ProbeResult{}
+	probeTime := time.Time{}
+	if cfg.Health.Enabled && cfg.Health.Target != "" {
+		probeResult, err := s.backend.Probe(cfg.Health.Target)
+		if err == nil {
+			result = probeResult
+			probeTime = time.Now().UTC()
+		}
 	}
-	probeTime := time.Now().UTC()
 	s.mu.Lock()
+	if observeErr == nil && observation != nil {
+		s.state.WANIPv4 = observation.WANIPv4
+		s.state.TunnelUp = observation.TunnelUp
+	}
 	s.state.PingOK = result.PingOK
 	s.state.PingMs = result.PingMs
-	s.state.LastPingAt = probeTime
-	if result.PingOK {
-		s.removeDegradedReasonLocked(tunnel.ReasonHealthProbeFailed)
-	} else if !containsString(s.state.DegradedReasons, tunnel.ReasonHealthProbeFailed) && cfg.Tunnel.Enabled {
-		s.state.DegradedReasons = append(s.state.DegradedReasons, tunnel.ReasonHealthProbeFailed)
+	if !probeTime.IsZero() {
+		s.state.LastPingAt = probeTime
 	}
+	s.replaceManagedIPv6AddressReasonsLocked(managedIPv6AddressReasons(observation))
+	appendErrorReason(&s.state.DegradedReasons, observeErr)
+	if cfg.Health.Enabled {
+		if result.PingOK {
+			s.removeDegradedReasonLocked(tunnel.ReasonHealthProbeFailed)
+		} else if !containsString(s.state.DegradedReasons, tunnel.ReasonHealthProbeFailed) && cfg.Tunnel.Enabled {
+			s.state.DegradedReasons = append(s.state.DegradedReasons, tunnel.ReasonHealthProbeFailed)
+		}
+	}
+	if observeErr != nil || hasMissingManagedIPv6Addresses(observation) {
+		s.state.ReconcileState = tunnel.ReconcileDegraded
+	}
+	s.state.LastError = firstReason(s.state.DegradedReasons)
 	if err := SaveState(s.statePath, s.state); err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
 	status := s.state.CloneStatus()
 	s.mu.Unlock()
-	if allowAutoRestart && cfg.Health.AutoRestart && cfg.Tunnel.Enabled {
-		if cfg.Validate() == nil && !result.PingOK {
+	shouldRecoverFailedProbe := cfg.Health.Enabled && !result.PingOK
+	shouldRecoverMissingAddress := hasMissingManagedIPv6Addresses(observation)
+	if allowAutoRestart && cfg.Health.AutoRestart && cfg.Tunnel.Enabled && len(validationReasons) == 0 {
+		if shouldRecoverFailedProbe {
+			slog.Warn("health probe failed, triggering full reconcile",
+				"target", cfg.Health.Target,
+				"ping_ms", result.PingMs,
+			)
 			if err := s.reconcile(true); err != nil {
 				return nil, err
 			}
 			return s.Status()
 		}
+		if shouldRecoverMissingAddress {
+			slog.Info("managed IPv6 addresses missing, running lightweight repair",
+				"missing", observation.MissingIPv6Addresses,
+			)
+			if repairErr := s.repairManagedAddresses(); repairErr != nil {
+				slog.Error("repair failed, falling back to full reconcile", "error", repairErr)
+				if err := s.reconcile(true); err != nil {
+					return nil, err
+				}
+			}
+			return s.Status()
+		}
 	}
 	return status, nil
+}
+
+func (s *Service) repairManagedAddresses() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cfg := s.config.Clone()
+	if cfg.Validate() != nil || !cfg.Tunnel.Enabled {
+		return nil
+	}
+	startedAt := time.Now()
+	repairErr := s.backend.RepairAddresses(RepairInput{Config: cfg})
+	slog.Info("repair completed",
+		"duration_ms", time.Since(startedAt).Milliseconds(),
+		"error", repairErr,
+	)
+	observation, observeErr := s.backend.Observe(buildObserveInput(cfg, nil))
+	if observation == nil {
+		observation = &Observation{}
+	}
+	s.replaceManagedIPv6AddressReasonsLocked(managedIPv6AddressReasons(observation))
+	if repairErr != nil {
+		appendErrorReason(&s.state.DegradedReasons, repairErr)
+	}
+	if observeErr != nil {
+		appendErrorReason(&s.state.DegradedReasons, observeErr)
+	}
+	if repairErr == nil && observeErr == nil && !hasMissingManagedIPv6Addresses(observation) {
+		if observation.TunnelUp && len(s.state.DegradedReasons) == 0 {
+			s.state.ReconcileState = tunnel.ReconcileReady
+		}
+	} else {
+		s.state.ReconcileState = tunnel.ReconcileDegraded
+	}
+	s.state.LastError = firstReason(s.state.DegradedReasons)
+	if err := SaveState(s.statePath, s.state); err != nil {
+		return err
+	}
+	if repairErr != nil {
+		return repairErr
+	}
+	return observeErr
 }
 
 func (s *Service) reconcile(force bool) error {
@@ -276,6 +360,13 @@ func (s *Service) reconcileLocked(force bool) error {
 	validationErr := cfg.Validate()
 	validationReasons := validationReasons(validationErr)
 	previousApplied := s.state.Applied
+	reconcileStart := time.Now()
+	slog.Info("reconcile started",
+		"force", force,
+		"tunnel_enabled", document.TunnelEnabled,
+		"active_profile", document.ActiveProfileID,
+		"config_valid", len(validationReasons) == 0,
+	)
 	s.state.Interface = tunnel.InterfaceName
 	s.state.DesiredEnabled = document.TunnelEnabled
 	s.state.ActiveProfileID = document.ActiveProfileID
@@ -298,7 +389,10 @@ func (s *Service) reconcileLocked(force bool) error {
 	if backendErr == nil && len(validationReasons) == 0 && cfg.Tunnel.Enabled && cfg.LAN.Enabled && len(cfg.LAN.Networks) > 0 {
 		advertiserErr = s.startAdvertiserLocked(cfg)
 	}
-	observation, observeErr := s.backend.Observe(ObserveInput{WANInterface: cfg.Server.WANInterface})
+	observation, observeErr := s.backend.Observe(buildObserveInput(cfg, validationReasons))
+	if observation == nil {
+		observation = &Observation{}
+	}
 	probeResult := ProbeResult{}
 	probeTime := time.Time{}
 	if len(validationReasons) == 0 && cfg.Tunnel.Enabled && cfg.Health.Enabled && cfg.Health.Target != "" {
@@ -322,6 +416,7 @@ func (s *Service) reconcileLocked(force bool) error {
 		s.state.LastPingAt = probeTime
 	}
 	s.state.DegradedReasons = validationReasons
+	appendManagedIPv6AddressReasons(&s.state.DegradedReasons, observation)
 	appendErrorReason(&s.state.DegradedReasons, backendErr)
 	appendErrorReason(&s.state.DegradedReasons, advertiserErr)
 	appendErrorReason(&s.state.DegradedReasons, observeErr)
@@ -332,13 +427,21 @@ func (s *Service) reconcileLocked(force bool) error {
 	}
 	s.state.LastError = firstReason(s.state.DegradedReasons)
 	s.state.LastReconcileAt = time.Now().UTC()
+	slog.Info("reconcile finished",
+		"duration_ms", time.Since(reconcileStart).Milliseconds(),
+		"backend_error", backendErr,
+		"advertiser_error", advertiserErr,
+		"observe_error", observeErr,
+		"probe_ok", probeResult.PingOK,
+		"degraded_reasons", s.state.DegradedReasons,
+	)
 	switch {
 	case !cfg.Tunnel.Enabled:
 		s.state.ReconcileState = tunnel.ReconcileDown
 		s.state.Applied = emptyAppliedState()
 	case len(validationReasons) > 0:
 		s.state.ReconcileState = tunnel.ReconcileDegraded
-	case backendErr != nil || advertiserErr != nil || observeErr != nil:
+	case backendErr != nil || advertiserErr != nil || observeErr != nil || hasMissingManagedIPv6Addresses(observation):
 		s.state.ReconcileState = tunnel.ReconcileDegraded
 		s.state.Applied = buildAppliedState(cfg)
 	case observation.TunnelUp:
@@ -434,6 +537,37 @@ func resolveRADNSServers(cfg *config.Config) ([]netip.Addr, error) {
 	return deriveRouterDNSServers(cfg.LAN.Networks)
 }
 
+func buildObserveInput(cfg *config.Config, validationReasons []string) ObserveInput {
+	input := ObserveInput{WANInterface: cfg.Server.WANInterface}
+	if len(validationReasons) == 0 && cfg.Tunnel.Enabled {
+		input.Config = cfg
+	}
+	return input
+}
+
+func appendManagedIPv6AddressReasons(reasons *[]string, observation *Observation) {
+	for _, reason := range managedIPv6AddressReasons(observation) {
+		if !containsString(*reasons, reason) {
+			*reasons = append(*reasons, reason)
+		}
+	}
+}
+
+func managedIPv6AddressReasons(observation *Observation) []string {
+	if observation == nil || len(observation.MissingIPv6Addresses) == 0 {
+		return []string{}
+	}
+	reasons := make([]string, 0, len(observation.MissingIPv6Addresses))
+	for _, address := range observation.MissingIPv6Addresses {
+		reasons = append(reasons, managedIPv6AddressMissingReasonPrefix+address)
+	}
+	return reasons
+}
+
+func hasMissingManagedIPv6Addresses(observation *Observation) bool {
+	return observation != nil && len(observation.MissingIPv6Addresses) > 0
+}
+
 func deriveRouterDNSServers(networks []config.NetworkConfig) ([]netip.Addr, error) {
 	dnsServers := make([]netip.Addr, 0, len(networks))
 	seen := make(map[string]struct{}, len(networks))
@@ -468,6 +602,22 @@ func (s *Service) removeDegradedReasonLocked(reason string) {
 			continue
 		}
 		filtered = append(filtered, currentReason)
+	}
+	s.state.DegradedReasons = filtered
+}
+
+func (s *Service) replaceManagedIPv6AddressReasonsLocked(reasons []string) {
+	filtered := make([]string, 0, len(s.state.DegradedReasons)+len(reasons))
+	for _, currentReason := range s.state.DegradedReasons {
+		if strings.HasPrefix(currentReason, managedIPv6AddressMissingReasonPrefix) {
+			continue
+		}
+		filtered = append(filtered, currentReason)
+	}
+	for _, reason := range reasons {
+		if !containsString(filtered, reason) {
+			filtered = append(filtered, reason)
+		}
 	}
 	s.state.DegradedReasons = filtered
 }

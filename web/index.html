@@ -153,6 +153,40 @@
   .hint-err {
     color: #ff9f9f;
   }
+  .logs-toolbar {
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    margin-top: 12px; margin-bottom: 8px;
+  }
+  .logs-toolbar label {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px; color: var(--text-dim);
+  }
+  .logs-toolbar select {
+    padding: 4px 8px; background: var(--input-bg);
+    border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); font-family: monospace; font-size: 13px;
+  }
+  .logs-toolbar input[type="checkbox"] { width: auto; }
+  .logs-list {
+    max-height: 440px; overflow-y: auto;
+    background: var(--input-bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px;
+    font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px;
+    line-height: 1.5;
+  }
+  .log-entry {
+    padding: 2px 4px; border-radius: 3px; white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .log-entry + .log-entry { margin-top: 2px; }
+  .log-entry-INFO { color: var(--text); }
+  .log-entry-WARN { color: #ffd166; background: rgba(255, 209, 102, 0.08); }
+  .log-entry-ERROR { color: #ff9f9f; background: rgba(255, 159, 159, 0.08); }
+  .log-entry-DEBUG { color: var(--text-dim); }
+  .log-time { color: var(--text-dim); margin-right: 6px; }
+  .log-level { font-weight: 600; margin-right: 6px; }
+  .log-msg { color: var(--text); }
+  .log-attrs { color: var(--text-dim); font-size: 11px; margin-left: 6px; }
   .toast {
     position: fixed; bottom: 20px; right: 20px; padding: 12px 20px;
     border-radius: 8px; font-size: 14px; display: none; z-index: 100;
@@ -358,6 +392,29 @@
 
       <button type="submit" class="btn-save">Save Config</button>
     </form>
+  </details>
+
+  <details class="settings" id="logs-panel">
+    <summary>Logs</summary>
+    <div class="logs-toolbar">
+      <label class="logs-tail-label">
+        Show last
+        <select id="logs-tail-select">
+          <option value="100">100</option>
+          <option value="200" selected>200</option>
+          <option value="500">500</option>
+          <option value="1000">1000</option>
+        </select>
+        lines
+      </label>
+      <label class="logs-auto-label">
+        <input type="checkbox" id="logs-auto-refresh">
+        Auto-refresh
+      </label>
+      <button type="button" class="btn-secondary btn-sm" onclick="refreshLogs()">Refresh</button>
+    </div>
+    <div id="logs-path" class="hint"></div>
+    <div id="logs-list" class="logs-list">Loading...</div>
   </details>
 </div>
 
@@ -979,6 +1036,97 @@ document.getElementById('cfg-profile-name').addEventListener('input', () => {
   profile.name = document.getElementById('cfg-profile-name').value;
   renderProfileSelect();
   renderProfileMeta();
+});
+
+let logsAutoRefreshTimer = null;
+
+function formatLogTime(isoString) {
+  if (!isoString) return '';
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return isoString;
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  const ss = String(date.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+function formatLogAttrs(record) {
+  const skip = new Set(['time', 'level', 'msg']);
+  const parts = [];
+  for (const key of Object.keys(record)) {
+    if (skip.has(key)) continue;
+    const value = record[key];
+    if (value === null || value === undefined || value === '') continue;
+    let rendered;
+    if (typeof value === 'string') rendered = value;
+    else rendered = JSON.stringify(value);
+    parts.push(`${key}=${rendered}`);
+  }
+  return parts.join(' ');
+}
+
+function renderLogLine(line) {
+  let record;
+  try {
+    record = JSON.parse(line);
+  } catch (err) {
+    return `<div class="log-entry">${esc(line)}</div>`;
+  }
+  const level = (record.level || 'INFO').toUpperCase();
+  const time = formatLogTime(record.time);
+  const msg = record.msg || '';
+  const attrs = formatLogAttrs(record);
+  return `<div class="log-entry log-entry-${esc(level)}">` +
+    `<span class="log-time">${esc(time)}</span>` +
+    `<span class="log-level">${esc(level)}</span>` +
+    `<span class="log-msg">${esc(msg)}</span>` +
+    (attrs ? `<span class="log-attrs">${esc(attrs)}</span>` : '') +
+    `</div>`;
+}
+
+async function refreshLogs() {
+  const tailValue = document.getElementById('logs-tail-select').value;
+  const listEl = document.getElementById('logs-list');
+  try {
+    const data = await api('GET', `/api/logs?tail=${encodeURIComponent(tailValue)}`);
+    const pathEl = document.getElementById('logs-path');
+    if (pathEl) pathEl.textContent = data.path ? `File: ${data.path}` : '';
+    const lines = Array.isArray(data.lines) ? data.lines : [];
+    if (lines.length === 0) {
+      listEl.innerHTML = '<div class="hint">No log entries yet.</div>';
+      return;
+    }
+    listEl.innerHTML = lines.map(renderLogLine).join('');
+    listEl.scrollTop = listEl.scrollHeight;
+  } catch (err) {
+    listEl.innerHTML = `<div class="hint hint-err">Failed to load logs: ${esc(err.message)}</div>`;
+  }
+}
+
+function setLogsAutoRefresh(enabled) {
+  if (logsAutoRefreshTimer) {
+    clearInterval(logsAutoRefreshTimer);
+    logsAutoRefreshTimer = null;
+  }
+  if (enabled) {
+    logsAutoRefreshTimer = setInterval(refreshLogs, 3000);
+  }
+}
+
+document.getElementById('logs-panel').addEventListener('toggle', event => {
+  if (event.target.open) {
+    refreshLogs();
+    if (document.getElementById('logs-auto-refresh').checked) {
+      setLogsAutoRefresh(true);
+    }
+  } else {
+    setLogsAutoRefresh(false);
+  }
+});
+
+document.getElementById('logs-tail-select').addEventListener('change', refreshLogs);
+document.getElementById('logs-auto-refresh').addEventListener('change', event => {
+  setLogsAutoRefresh(event.target.checked && document.getElementById('logs-panel').open);
 });
 
 refreshStatus().then(() => loadConfig());

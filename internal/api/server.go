@@ -44,6 +44,7 @@ func newAPIMux(h *Handler) *http.ServeMux {
 	apiMux.HandleFunc("GET /api/config", h.HandleGetConfig)
 	apiMux.HandleFunc("PUT /api/config", h.HandleUpdateConfig)
 	apiMux.HandleFunc("GET /api/health", h.HandleGetHealth)
+	apiMux.HandleFunc("GET /api/logs", h.HandleGetLogs)
 	apiMux.HandleFunc("POST /api/tunnel/up", h.HandleTunnelUp)
 	apiMux.HandleFunc("POST /api/tunnel/down", h.HandleTunnelDown)
 	apiMux.HandleFunc("POST /api/tunnel/restart", h.HandleTunnelRestart)

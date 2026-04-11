@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/eagle23/unifi-tunnel-4to6/internal/api"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/config"
+	"github.com/eagle23/unifi-tunnel-4to6/internal/logging"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/tunnel"
 	webui "github.com/eagle23/unifi-tunnel-4to6/web"
 )
@@ -401,6 +403,58 @@ func TestControlServerSkipsExternalAuth(t *testing.T) {
 	server.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+func TestHandleGetLogsReturnsTailedEntries(t *testing.T) {
+	dir := t.TempDir()
+	if err := logging.Init(dir); err != nil {
+		t.Fatalf("logging.Init() error: %v", err)
+	}
+	defer logging.Close()
+	slog.Info("reconcile started", "force", true)
+	slog.Warn("probe failed")
+	controller := &mockController{
+		document: config.DefaultDocument(),
+		status:   &tunnel.Status{},
+	}
+	handler := api.NewHandler(controller)
+	req := httptest.NewRequest(http.MethodGet, "/api/logs?tail=50", nil)
+	w := httptest.NewRecorder()
+	handler.HandleGetLogs(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	var body struct {
+		Path  string   `json:"path"`
+		Lines []string `json:"lines"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if body.Path == "" {
+		t.Fatal("expected path to be populated")
+	}
+	if len(body.Lines) < 2 {
+		t.Fatalf("lines = %d, want >= 2", len(body.Lines))
+	}
+	joined := body.Lines[0] + "\n" + body.Lines[len(body.Lines)-1]
+	if !bytes.Contains([]byte(joined), []byte("reconcile started")) {
+		t.Fatalf("first entry missing: %v", body.Lines)
+	}
+}
+
+func TestHandleGetLogsRejectsInvalidTail(t *testing.T) {
+	controller := &mockController{
+		document: config.DefaultDocument(),
+		status:   &tunnel.Status{},
+	}
+	handler := api.NewHandler(controller)
+	req := httptest.NewRequest(http.MethodGet, "/api/logs?tail=abc", nil)
+	w := httptest.NewRecorder()
+	handler.HandleGetLogs(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }
 

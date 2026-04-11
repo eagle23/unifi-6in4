@@ -5,9 +5,16 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/eagle23/unifi-tunnel-4to6/internal/config"
+	"github.com/eagle23/unifi-tunnel-4to6/internal/logging"
 	"github.com/eagle23/unifi-tunnel-4to6/internal/tunnel"
+)
+
+const (
+	defaultLogTailLines = 200
+	maxLogTailLines     = 2000
 )
 
 // Controller abstracts daemon control-plane operations for HTTP handlers.
@@ -71,6 +78,33 @@ func (h *Handler) HandleTunnelRestart(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) HandleGetConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.controller.GetConfigDocument())
+}
+
+func (h *Handler) HandleGetLogs(w http.ResponseWriter, r *http.Request) {
+	limit := defaultLogTailLines
+	if raw := r.URL.Query().Get("tail"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			http.Error(w, "invalid tail parameter", http.StatusBadRequest)
+			return
+		}
+		if parsed > maxLogTailLines {
+			parsed = maxLogTailLines
+		}
+		limit = parsed
+	}
+	lines, err := logging.Tail(limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if lines == nil {
+		lines = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":  logging.Path(),
+		"lines": lines,
+	})
 }
 
 func (h *Handler) HandleUpdateConfig(w http.ResponseWriter, r *http.Request) {

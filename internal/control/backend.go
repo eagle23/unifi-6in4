@@ -34,6 +34,7 @@ type Backend interface {
 	Reconcile(input ReconcileInput) error
 	Observe(input ObserveInput) (*Observation, error)
 	Probe(target string) (ProbeResult, error)
+	RepairAddresses(input RepairInput) error
 }
 
 // ReconcileInput describes the desired dataplane state.
@@ -44,15 +45,23 @@ type ReconcileInput struct {
 	Applied     AppliedState
 }
 
+// RepairInput describes a lightweight reconciliation that only ensures
+// managed IPv6 addresses are present, without rebuilding the tunnel.
+type RepairInput struct {
+	Config *config.Config
+}
+
 // ObserveInput describes the current read-only dataplane observation request.
 type ObserveInput struct {
 	WANInterface string
+	Config       *config.Config
 }
 
 // Observation holds a lightweight dataplane observation.
 type Observation struct {
-	TunnelUp bool
-	WANIPv4  string
+	TunnelUp             bool
+	WANIPv4              string
+	MissingIPv6Addresses []string
 }
 
 // ProbeResult holds the result of an IPv6 health probe.
@@ -120,7 +129,7 @@ func (b *SystemBackend) Reconcile(input ReconcileInput) error {
 	if err := b.run("ip", "link", "set", tunnel.InterfaceName, "up"); err != nil {
 		return err
 	}
-	if err := b.run("ip", "-6", "addr", "add", input.Config.Tunnel.LocalIPv6, "dev", tunnel.InterfaceName); err != nil {
+	if err := b.ensureIPv6AddressPresent(tunnel.InterfaceName, input.Config.Tunnel.LocalIPv6); err != nil {
 		return err
 	}
 	if err := b.run("sysctl", "-w", "net.ipv6.conf.all.forwarding=1"); err != nil {
@@ -139,7 +148,7 @@ func (b *SystemBackend) Reconcile(input ReconcileInput) error {
 			if err != nil {
 				return err
 			}
-			if err := b.run("ip", "-6", "addr", "add", gatewayAddress, "dev", network.Interface); err != nil {
+			if err := b.ensureIPv6AddressPresent(network.Interface, gatewayAddress); err != nil {
 				return err
 			}
 		}
@@ -199,15 +208,59 @@ func (b *SystemBackend) ensureLANInterfaceReady(interfaceName string) error {
 	if !hasProblematicLinkLocal(string(output)) {
 		return nil
 	}
-	if err := b.run("ip", "link", "set", "dev", interfaceName, "down"); err != nil {
+	// Toggle disable_ipv6 to reset IPv6 state on the interface without bouncing L2.
+	// L2 stays up, so IPv4/DHCP clients are unaffected; IPv6 blackout is sub-second.
+	if err := b.run("sysctl", "-w", fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", interfaceName)); err != nil {
 		return err
 	}
-	sleepFn(1 * time.Second)
-	if err := b.run("ip", "link", "set", "dev", interfaceName, "up"); err != nil {
+	sleepFn(300 * time.Millisecond)
+	if err := b.run("sysctl", "-w", fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=0", interfaceName)); err != nil {
 		return err
 	}
-	sleepFn(2 * time.Second)
+	sleepFn(500 * time.Millisecond)
 	return nil
+}
+
+// RepairAddresses ensures all managed IPv6 addresses are present without rebuilding
+// the tunnel, touching firewall rules, or bouncing LAN interfaces.
+func (b *SystemBackend) RepairAddresses(input RepairInput) error {
+	if input.Config == nil || !input.Config.Tunnel.Enabled {
+		return nil
+	}
+	if err := b.ensureIPv6AddressPresent(tunnel.InterfaceName, input.Config.Tunnel.LocalIPv6); err != nil {
+		return err
+	}
+	if !input.Config.LAN.Enabled {
+		return nil
+	}
+	for _, network := range input.Config.LAN.Networks {
+		gatewayAddress, err := gatewayForPrefix(network.Prefix)
+		if err != nil {
+			return err
+		}
+		if err := b.ensureIPv6AddressPresent(network.Interface, gatewayAddress); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *SystemBackend) ensureIPv6AddressPresent(interfaceName string, prefixValue string) error {
+	state, err := b.queryInterfaceIPv6Address(interfaceName, prefixValue)
+	if err != nil {
+		return err
+	}
+	switch state {
+	case ipv6AddressHealthy:
+		return nil
+	case ipv6AddressUnhealthy:
+		// dadfailed/tentative: address is present but unusable — drop it first so
+		// the fresh add replaces the broken entry instead of failing with EEXIST.
+		if err := b.run("ip", "-6", "addr", "del", prefixValue, "dev", interfaceName); err != nil {
+			return err
+		}
+	}
+	return b.run("ip", "-6", "addr", "add", prefixValue, "dev", interfaceName)
 }
 
 // Observe reads the lightweight runtime state.
@@ -216,13 +269,17 @@ func (b *SystemBackend) Observe(input ObserveInput) (*Observation, error) {
 	if _, err := b.runner.CombinedOutput("ip", "link", "show", tunnel.InterfaceName); err == nil {
 		observation.TunnelUp = true
 	}
-	if strings.TrimSpace(input.WANInterface) == "" {
-		return observation, nil
+	if strings.TrimSpace(input.WANInterface) != "" {
+		wanIP, err := b.getWANIPv4(input.WANInterface)
+		if err == nil {
+			observation.WANIPv4 = wanIP
+		}
 	}
-	wanIP, err := b.getWANIPv4(input.WANInterface)
-	if err == nil {
-		observation.WANIPv4 = wanIP
+	missingAddresses, err := b.collectMissingManagedIPv6Addresses(input.Config)
+	if err != nil {
+		return observation, err
 	}
+	observation.MissingIPv6Addresses = missingAddresses
 	return observation, nil
 }
 
@@ -305,7 +362,109 @@ func (b *SystemBackend) getInterfaceMTU(interfaceName string) (int, error) {
 }
 
 func hasProblematicLinkLocal(output string) bool {
-	return strings.Contains(output, "scope link") && (strings.Contains(output, "dadfailed") || strings.Contains(output, "tentative"))
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 || fields[0] != "inet6" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(fields[1])
+		if err != nil {
+			continue
+		}
+		if !prefix.Addr().IsLinkLocalUnicast() {
+			continue
+		}
+		for _, flag := range fields[2:] {
+			if flag == "dadfailed" || flag == "tentative" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (b *SystemBackend) collectMissingManagedIPv6Addresses(cfg *config.Config) ([]string, error) {
+	if cfg == nil || !cfg.Tunnel.Enabled {
+		return []string{}, nil
+	}
+	missingAddresses := make([]string, 0, len(cfg.LAN.Networks)+1)
+	var err error
+	missingAddresses, err = b.appendMissingIPv6Address(missingAddresses, tunnel.InterfaceName, cfg.Tunnel.LocalIPv6)
+	if err != nil {
+		return nil, err
+	}
+	if !cfg.LAN.Enabled {
+		return missingAddresses, nil
+	}
+	for _, network := range cfg.LAN.Networks {
+		gatewayAddress, gatewayErr := gatewayForPrefix(network.Prefix)
+		if gatewayErr != nil {
+			return nil, gatewayErr
+		}
+		missingAddresses, err = b.appendMissingIPv6Address(missingAddresses, network.Interface, gatewayAddress)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return missingAddresses, nil
+}
+
+func (b *SystemBackend) appendMissingIPv6Address(missingAddresses []string, interfaceName string, prefixValue string) ([]string, error) {
+	state, err := b.queryInterfaceIPv6Address(interfaceName, prefixValue)
+	if err != nil {
+		return nil, err
+	}
+	switch state {
+	case ipv6AddressHealthy:
+		return missingAddresses, nil
+	case ipv6AddressUnhealthy:
+		return append(missingAddresses, fmt.Sprintf("%s unhealthy %s", interfaceName, prefixValue)), nil
+	default:
+		return append(missingAddresses, fmt.Sprintf("%s missing %s", interfaceName, prefixValue)), nil
+	}
+}
+
+type ipv6AddressState int
+
+const (
+	ipv6AddressMissing ipv6AddressState = iota
+	ipv6AddressHealthy
+	ipv6AddressUnhealthy
+)
+
+func (b *SystemBackend) queryInterfaceIPv6Address(interfaceName string, prefixValue string) (ipv6AddressState, error) {
+	desiredPrefix, err := netip.ParsePrefix(prefixValue)
+	if err != nil {
+		return ipv6AddressMissing, fmt.Errorf("parse IPv6 prefix %q: %w", prefixValue, err)
+	}
+	output, err := b.runner.CombinedOutput("ip", "-6", "addr", "show", "dev", interfaceName)
+	if err != nil {
+		return ipv6AddressMissing, fmt.Errorf("read IPv6 addresses on %s: %w", interfaceName, err)
+	}
+	return findIPv6PrefixState(string(output), desiredPrefix), nil
+}
+
+func findIPv6PrefixState(output string, desiredPrefix netip.Prefix) ipv6AddressState {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 || fields[0] != "inet6" {
+			continue
+		}
+		existingPrefix, err := netip.ParsePrefix(fields[1])
+		if err != nil {
+			continue
+		}
+		if existingPrefix != desiredPrefix {
+			continue
+		}
+		for _, flag := range fields[2:] {
+			if flag == "dadfailed" || flag == "tentative" {
+				return ipv6AddressUnhealthy
+			}
+		}
+		return ipv6AddressHealthy
+	}
+	return ipv6AddressMissing
 }
 
 func (b *SystemBackend) run(name string, args ...string) error {
@@ -367,6 +526,13 @@ func selectDefaultRouteSource(cfg *config.Config) (string, error) {
 	if cfg == nil {
 		return "", nil
 	}
+	tunnelAddress, err := addressFromPrefix(cfg.Tunnel.LocalIPv6)
+	if err != nil {
+		return "", err
+	}
+	if isPreferredIPv6SourceAddress(tunnelAddress) {
+		return tunnelAddress.String(), nil
+	}
 	for _, network := range cfg.LAN.Networks {
 		gatewayPrefix, err := gatewayForPrefix(network.Prefix)
 		if err != nil {
@@ -379,13 +545,6 @@ func selectDefaultRouteSource(cfg *config.Config) (string, error) {
 		if isPreferredIPv6SourceAddress(gatewayAddress) {
 			return gatewayAddress.String(), nil
 		}
-	}
-	tunnelAddress, err := addressFromPrefix(cfg.Tunnel.LocalIPv6)
-	if err != nil {
-		return "", err
-	}
-	if isPreferredIPv6SourceAddress(tunnelAddress) {
-		return tunnelAddress.String(), nil
 	}
 	return "", nil
 }
